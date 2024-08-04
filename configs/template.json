@@ -1,0 +1,62 @@
+{
+    "halo": {
+      "include": true,
+      "v0": 2.0,
+      "r_s": 1.0,
+      "dr_trunc_halo": 5.0,
+      "cusp": 1.0,
+      "chalo" : 150,
+      "dr_trunc" : 5
+    },
+    "disk1": {
+      "include": true,
+      "mdisk": 30.0,
+      "rdisk": 4.0,
+      "outdisk": 15.0,
+      "zdisk": 0.4,
+      "drtrunc": 1.0,
+      "rhole": 0.0,
+      "rcore": 0.0
+    },
+    "disk2": {
+      "include": false,
+      "mdisk": 15.0,
+      "rdisk": 3.0,
+      "outdisk": 12.0,
+      "zdisk": 0.3,
+      "drtrunc": 0.8,
+      "rhole": 1.5,
+      "rcore": 0.8
+    },
+    "gas": {
+      "include": false,
+      "rmgas": 200.0,
+      "rgas": 8.0,
+      "outgas": 20.0,
+      "zgas0": 0.2,
+      "drtrunc": 0.5,
+      "gamma": 1.4,
+      "nr" : 100
+    },
+    "bulge": {
+      "include": true,
+      "nnn": 3.0,
+      "ppp": 1.0,
+      "v0bulge": 150.0,
+      "abulge": 0.5,
+      "drtrunc" : 0.5
+    },
+    "bh": {
+      "include": true,
+      "bh_mass": 1e6
+    },
+    "grid": {
+      "dr": 0.1,
+      "nr": 100,
+      "lmax": 4
+    },
+    "psi": {
+      "npsi": 200,
+      "nint": 1000
+    }
+  }

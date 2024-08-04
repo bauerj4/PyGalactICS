@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "pygalactics"
+version = "0.1.0"
+description = "Python wrapper for GalactICS code"
+authors = ["Jake Bauer <j.bauer@nazo.ai>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+numpy = "^2.0.1"
+scipy = "^1.14.0"
+black = "^24.8.0"
+matplotlib = "^3.9.1"
+numba = "^0.60.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
