@@ -437,3 +437,31 @@ class GasDensObj:
         # Now get the potential harmonics of this new density (BT 2-208)
         # Using Simpson's rule integration
         self.pot, self.fr = simpson_harm_int(self.nr, self.dr, self.dens)
+
+    def appgaspot(self, s: float, z: float) -> float:
+        """
+        Compute the approximate gas potential at a point (s, z).
+
+        Parameters
+        ----------
+        s : float
+            Radial distance in the gas plane.
+        z : float
+            Vertical distance from the gas plane.
+
+        Returns
+        -------
+        float
+            Approximate gas potential.
+        """
+        r = np.sqrt(s**2 + z**2)
+        zgas = self.getzgas(s)
+
+        f, f1r, f2 = self.gassurfdens(r)
+
+        if f == 0.0:
+            return 0.0
+        else:
+            g, g1, g2 = self.gasvertdens(z, zgas)
+            potential = -4 * pi * f * zgas * g / 2.0
+            return potential

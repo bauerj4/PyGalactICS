@@ -1,8 +1,16 @@
 import numpy as np
-from scipy.special import gamma, gammainc, gammaincc
+from scipy.special import gamma, gammainc, gammaincc, gammaln
 
 
 class BulgeDensObj:
+    """
+    BulgeDensObj
+
+    TODO: potential can yield negative values because of root
+    finding algorithm. We need to strictly enforce positive Psi.
+
+    """
+
     def __init__(
         self,
         nnn: float = None,
@@ -196,3 +204,130 @@ class BulgeDensObj:
             )
             / (self.nnn * u) ** 2
         )
+
+    def sersic_potential(self, radius: float) -> float:
+        """
+        Calculate the Sersic profile potential.
+
+        Parameters
+        ----------
+        radius : float
+            The radial distance from the center.
+
+        Returns
+        -------
+        float
+            The computed Sersic potential.
+        """
+        if radius == 0:
+            return self.v0bulge**2
+
+        u = radius / self.re
+        u_n = u ** (1.0 / self.nnn)
+        aaa = self.nnn * (3.0 - self.pp)
+
+        l1 = (
+            self.rho0
+            * self.re**2
+            * self.nnn
+            * self.butt ** (self.nnn * (self.pp - 2))
+            * gammaincc(self.nnn * (2.0 - self.pp), self.butt * u_n)
+            * np.exp(gammaln(self.nnn * (2.0 - self.pp)))
+        )
+
+        l2 = (
+            self.rho0
+            * self.re**3
+            * self.nnn
+            * self.butt ** (-aaa)
+            * np.exp(gammaln(aaa))
+        )
+
+        if aaa + 1 > self.butt * u_n:
+            l2 *= gammaincc(aaa, self.butt * u_n) - 1
+        else:
+            l2 *= 1 - gammaincc(aaa, self.butt * u_n)
+
+        return 4.0 * np.pi * (l2 / radius + l1)
+
+    def sersic_mass(self, radius: float) -> float:
+        """
+        Calculate the mass enclosed within a spherical radius using the Sersic profile.
+
+        Parameters
+        ----------
+        radius : float
+            The radial distance from the center.
+        bulge : BulgeObject
+            The BulgeObject containing Sersic profile parameters.
+
+        Returns
+        -------
+        float
+            The computed mass.
+        """
+        u = radius / self.re
+        u_n = u ** (1.0 / self.nnn)
+        aaa = self.nnn * (3.0 - self.pp)
+
+        if aaa + 1 > self.butt * u_n:
+            gm = gammaincc(aaa, self.butt * u_n) - 1
+        else:
+            gm = 1 - gammaincc(aaa, self.butt * u_n)
+
+        return (
+            4.0
+            * np.pi
+            * self.rho0
+            * self.re**3
+            * self.nnn
+            * self.butt ** (self.nnn * (self.pp - 3))
+            * gm
+            * np.exp(gammaln(self.nnn * (3.0 - self.pp)))
+        )
+
+    def sersic_force(self, radius: float) -> float:
+        """
+        Compute the force exerted by a Sersic profile bulge.
+
+        Parameters
+        ----------
+        radius : float
+            Radial distance at which the force is calculated.
+
+        Returns
+        -------
+        float
+            The computed force at the specified radius.
+
+        Notes
+        -----
+        The force is calculated using the formula:
+        \[
+        F = -\frac{4 \pi L2}{\text{radius}^2}
+        \]
+        where \(L2\) is derived from the Sersic profile parameters and involves
+        special functions such as the Gamma function and its regularized incomplete version.
+        """
+        # Compute intermediate variables
+        u = radius / self.re
+        un = u ** (1.0 / self.nnn)
+        aaa = self.nnn * (3.0 - self.pp)
+
+        # Calculate L2 using the Sersic parameters
+        l2 = (
+            self.rho0
+            * (self.re**3)
+            * self.nnn
+            * (self.butt ** (-aaa))
+            * np.exp(gammaln(aaa))
+        )
+        if aaa + 1 > self.butt * un:
+            l2 *= gammaincc(aaa, self.butt * un)
+        else:
+            l2 *= 1.0 - gammaincc(aaa, self.butt * un)
+
+        # Compute the force
+        force = -4.0 * np.pi * (l2 / (radius**2))
+
+        return force

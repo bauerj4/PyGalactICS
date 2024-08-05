@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit
 
+
 @njit
 def simpson_harm_int(nx, dx, density_array):
     """
@@ -30,7 +31,9 @@ def simpson_harm_int(nx, dx, density_array):
 
     integral_s1[0] = 0.0
     radial_distance = 2.0 * dx
-    integral_s1[2] = (radial_distance * dx / 3.0) * (4 * density_array[1] * (1.0 - dx / radial_distance) ** 2.0 + density_array[2])
+    integral_s1[2] = (radial_distance * dx / 3.0) * (
+        4 * density_array[1] * (1.0 - dx / radial_distance) ** 2.0 + density_array[2]
+    )
     previous_radial_distance = radial_distance
 
     for i in range(4, nx + 1, 2):
@@ -40,7 +43,10 @@ def simpson_harm_int(nx, dx, density_array):
             + 4 * density_array[i - 1] * (1.0 - dx / radial_distance) ** 2.0
             + density_array[i]
         )
-        integral_s1[i] = integral_s1_part + integral_s1[i - 2] * previous_radial_distance / radial_distance
+        integral_s1[i] = (
+            integral_s1_part
+            + integral_s1[i - 2] * previous_radial_distance / radial_distance
+        )
         previous_radial_distance = radial_distance
 
     integral_s2[nx] = 0.0
@@ -61,7 +67,9 @@ def simpson_harm_int(nx, dx, density_array):
         potential_array[i] = (4.0 * np.pi) * (integral_s1[i] + integral_s2[i])
         force_array[i] = -(4.0 * np.pi) * integral_s1[i] / radial_distance
 
-    potential_array[0] = 3 * (potential_array[2] - potential_array[4]) + potential_array[6]
+    potential_array[0] = (
+        3 * (potential_array[2] - potential_array[4]) + potential_array[6]
+    )
     force_array[0] = 0.0
 
     for i in range(1, nx, 2):
@@ -69,6 +77,7 @@ def simpson_harm_int(nx, dx, density_array):
         force_array[i] = (force_array[i - 1] + force_array[i + 1]) / 2.0
 
     return potential_array, force_array
+
 
 @njit
 def simpson_harm_int_high_l(nx, nl, dx, previous_l_max, fraction, density_array, max_l):
@@ -112,18 +121,24 @@ def simpson_harm_int_high_l(nx, nl, dx, previous_l_max, fraction, density_array,
         integral_s1[0] = 0.0
         radial_distance = 2.0 * dx
         integral_s1[2] = (radial_distance * dx / 3.0) * (
-            4 * density_array[l // 2 + 1, 1] * (1.0 - dx / radial_distance) ** 2.0 + density_array[l // 2 + 1, 2]
+            4 * density_array[l // 2 + 1, 1] * (1.0 - dx / radial_distance) ** 2.0
+            + density_array[l // 2 + 1, 2]
         )
         previous_radial_distance = radial_distance
 
         for i in range(4, nx + 1, 2):
             radial_distance = i * dx
             integral_s1_part = (radial_distance * dx / 3.0) * (
-                density_array[l // 2 + 1, i - 2] * (1.0 - 2 * dx / radial_distance) ** (l + 2)
-                + 4 * density_array[l // 2 + 1, i - 1] * (1.0 - dx / radial_distance) ** (l + 2)
+                density_array[l // 2 + 1, i - 2]
+                * (1.0 - 2 * dx / radial_distance) ** (l + 2)
+                + 4
+                * density_array[l // 2 + 1, i - 1]
+                * (1.0 - dx / radial_distance) ** (l + 2)
                 + density_array[l // 2 + 1, i]
             )
-            integral_s1[i] = integral_s1_part + integral_s1[i - 2] * (previous_radial_distance / radial_distance) ** (l + 1)
+            integral_s1[i] = integral_s1_part + integral_s1[i - 2] * (
+                previous_radial_distance / radial_distance
+            ) ** (l + 1)
             previous_radial_distance = radial_distance
 
         integral_s2[nx] = 0.0
@@ -132,18 +147,26 @@ def simpson_harm_int_high_l(nx, nl, dx, previous_l_max, fraction, density_array,
         for i in range(nx - 2, 1, -2):
             radial_distance = i * dx
             integral_s2_part = (radial_distance * dx / 3.0) * (
-                density_array[l // 2 + 1, i + 2] * (1.0 + 2 * dx / radial_distance) ** (1 - l)
-                + 4 * density_array[l // 2 + 1, i + 1] * (1.0 + dx / radial_distance) ** (1 - l)
+                density_array[l // 2 + 1, i + 2]
+                * (1.0 + 2 * dx / radial_distance) ** (1 - l)
+                + 4
+                * density_array[l // 2 + 1, i + 1]
+                * (1.0 + dx / radial_distance) ** (1 - l)
                 + density_array[l // 2 + 1, i]
             )
-            integral_s2[i] = integral_s2_part + integral_s2[i + 2] * (radial_distance / previous_radial_distance) ** l
+            integral_s2[i] = (
+                integral_s2_part
+                + integral_s2[i + 2] * (radial_distance / previous_radial_distance) ** l
+            )
             previous_radial_distance = radial_distance
 
         for i in range(2, nx + 1, 2):
             if l <= previous_l_max:
-                potential_array[l // 2 + 1, i] = fraction * potential_array[l // 2 + 1, i] + (1.0 - fraction) * (
-                    4.0 * np.pi
-                ) / (2.0 * l + 1.0) * (integral_s1[i] + integral_s2[i])
+                potential_array[l // 2 + 1, i] = fraction * potential_array[
+                    l // 2 + 1, i
+                ] + (1.0 - fraction) * (4.0 * np.pi) / (2.0 * l + 1.0) * (
+                    integral_s1[i] + integral_s2[i]
+                )
             else:
                 potential_array[l // 2 + 1, i] = (
                     (4.0 * np.pi) / (2.0 * l + 1.0) * (integral_s1[i] + integral_s2[i])
@@ -152,7 +175,11 @@ def simpson_harm_int_high_l(nx, nl, dx, previous_l_max, fraction, density_array,
         for i in range(2, nx + 1, 2):
             radial_distance = i * dx
             force_array[l // 2 + 1, i] = (
-                -4 * np.pi / (2.0 * l + 1.0) * (-(l + 1) * integral_s1[i] + l * integral_s2[i]) / radial_distance
+                -4
+                * np.pi
+                / (2.0 * l + 1.0)
+                * (-(l + 1) * integral_s1[i] + l * integral_s2[i])
+                / radial_distance
             )
             second_order_force_array[l // 2 + 1, i] = (
                 -4
@@ -165,9 +192,13 @@ def simpson_harm_int_high_l(nx, nl, dx, previous_l_max, fraction, density_array,
                 )
             )
 
-    potential_array[1, 0] = 3 * (potential_array[1, 2] - potential_array[1, 4]) + potential_array[1, 6]
+    potential_array[1, 0] = (
+        3 * (potential_array[1, 2] - potential_array[1, 4]) + potential_array[1, 6]
+    )
     force_array[1, 0] = 0.0
-    second_order_force_array[1, 0] = 2 * second_order_force_array[1, 2] - second_order_force_array[1, 4]
+    second_order_force_array[1, 0] = (
+        2 * second_order_force_array[1, 2] - second_order_force_array[1, 4]
+    )
 
     for l in range(2, nl + 1, 2):
         potential_array[l // 2 + 1, 0] = 0.0
@@ -183,7 +214,8 @@ def simpson_harm_int_high_l(nx, nl, dx, previous_l_max, fraction, density_array,
                 force_array[l // 2 + 1, i - 1] + force_array[l // 2 + 1, i + 1]
             ) / 2.0
             second_order_force_array[l // 2 + 1, i] = (
-                second_order_force_array[l // 2 + 1, i - 1] + second_order_force_array[l // 2 + 1, i + 1]
+                second_order_force_array[l // 2 + 1, i - 1]
+                + second_order_force_array[l // 2 + 1, i + 1]
             ) / 2.0
 
     return potential_array, force_array, second_order_force_array

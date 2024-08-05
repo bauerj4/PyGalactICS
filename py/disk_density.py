@@ -275,3 +275,32 @@ class DiskDensObj:
         # Now get the potential harmonics of this new density (BT 2-208)
         # Using Simpson's rule integration
         self.pot, self.fr = simpson_harm_int(self.nr, self.dr, self.dens)
+
+    def appdiskpot(self, s: float, z: float) -> float:
+        """
+        Compute the approximate disk potential at a point (s, z).
+
+        Parameters
+        ----------
+        s : float
+            Radial distance in the disk plane.
+        z : float
+            Vertical distance from the disk plane.
+        disk_obj : DiskObj
+            Disk object containing attributes like `zdisk`.
+
+        Returns
+        -------
+        float
+            Approximate disk potential.
+        """
+        r = np.sqrt(s**2 + z**2)
+
+        f, f1r, f2 = self.disksurfdens(r)
+
+        if f == 0.0:
+            return 0.0
+        else:
+            g, g1, g2 = self.diskvertdens(z)
+            potential = -4 * np.pi * f * self.zdisk * g / 2.0
+            return potential

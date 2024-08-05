@@ -42,7 +42,7 @@
       "include": true,
       "nnn": 3.0,
       "ppp": 1.0,
-      "v0bulge": 150.0,
+      "v0bulge": 1.500,
       "abulge": 0.5,
       "drtrunc" : 0.5
     },
