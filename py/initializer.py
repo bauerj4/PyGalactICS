@@ -7,7 +7,6 @@ from disk_density import DiskDensObj
 from halo_density import HaloDensObj
 from bulge_density import BulgeDensObj
 from gas_density import GasDensObj
-from grid_potential_utils import pot_from_grid
 
 
 class GalactICSInitializer:
