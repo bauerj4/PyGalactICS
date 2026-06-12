@@ -15,6 +15,6 @@ jupyter notebook notebooks/
 
 | Notebook | Description |
 |----------|-------------|
-| [`nfw_halo_walkthrough.ipynb`](nfw_halo_walkthrough.ipynb) | **GalactICS → ntropy** end-to-end: `dbh` + `genhalo`, force accuracy, density plots |
+| [`nfw_halo_walkthrough.ipynb`](nfw_halo_walkthrough.ipynb) | **GalactICS → ntropy** end-to-end: what GalactICS does, `nfw_halo_model_fast`, `dbh` + `genhalo`, and why each diagnostic plot is made |
 
 Artifacts (plots, particle files) land in `notebooks/artifacts/nfw_walkthrough/`.
