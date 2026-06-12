@@ -154,6 +154,19 @@ def merge_galacticsics_components(
     return state
 
 
+def nfw_halo_model_production():
+    """
+    Production NFW-only halo model (``GalaxyModel.nfw_halo_only``).
+
+    Uses ``nr=2000``, ``r_outer=100`` kpc, and the full legacy ``dbh`` grid.
+    Expect several minutes for ``solve_potential`` on a laptop.
+    """
+    require_galacticsics()
+    from galacticsics.models import GalaxyModel
+
+    return GalaxyModel.nfw_halo_only()
+
+
 def nfw_halo_model_fast():
     """
     Smaller NFW-only :class:`~galacticsics.models.GalaxyModel` for notebooks/tests.

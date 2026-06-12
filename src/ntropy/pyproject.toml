@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "numpy>=1.24"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,16 +13,18 @@ authors = [{ name = "GalactICS contributors" }]
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
+    "mpi4py>=3.1",
 ]
 
 [project.optional-dependencies]
-mpi = ["mpi4py>=3.1"]
+mpi = []  # mpi4py is a core dependency; extra kept for compatibility
 galacticsics = []  # sibling package; install from repo root: pip install -e .
 dev = [
     "pytest>=7.0",
     "matplotlib>=3.7",
+    "tqdm>=4.66",
 ]
-all = ["ntropy[mpi,galacticsics,dev]"]
+all = ["ntropy[galacticsics,dev]"]
 
 [project.scripts]
 ntropy-run = "ntropy.cli:main"

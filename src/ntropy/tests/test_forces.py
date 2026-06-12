@@ -17,6 +17,27 @@ def test_brute_bh_agreement(small_plummer_state):
     np.testing.assert_allclose(acc_brute, acc_bh, rtol=0.15, atol=1e-3)
 
 
+def test_bh_handles_duplicate_positions():
+    """Bootstrap-style duplicate coordinates must not blow the octree stack."""
+    pos = np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    mass = np.ones(3)
+    eps = np.full(3, 0.05)
+    acc_brute = compute_forces_brute(pos, mass, eps)
+    acc_bh = compute_forces_bh(pos, mass, eps, theta=0.5)
+    np.testing.assert_allclose(acc_brute, acc_bh, rtol=0.15, atol=1e-3)
+
+
+def test_brute_targets_matches_full(small_plummer_state):
+    """Domain-decomposed brute force must match the full sum on each target."""
+    state = small_plummer_state
+    targets = np.array([0, 2, 4, 7, 11], dtype=int)
+    full = compute_forces_brute(state.pos, state.mass, state.eps)
+    partial = compute_forces_brute(
+        state.pos, state.mass, state.eps, target_indices=targets
+    )
+    np.testing.assert_allclose(partial, full[targets], rtol=1e-12, atol=1e-12)
+
+
 def test_variable_softening_symmetry():
     pos = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
     mass = np.array([1.0, 1.0])

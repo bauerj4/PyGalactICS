@@ -71,8 +71,8 @@ Every run is defined by a JSON file. Required key: `particles.file`.
 | `force` | `theta` | 0.5 | Barnes–Hut opening angle |
 | `integrator` | `type` | `leapfrog` | `leapfrog` (symplectic), `euler`, `rk2`, `rk3`, `rk4` (explicit, not symplectic) |
 | `integrator` | `order` | `2` | Leapfrog only: `1` = symplectic Euler; `2` = velocity Verlet |
-| `integrator` | `dt` | 0.01 | Timestep |
-| `integrator` | `n_steps` | 100 | Number of steps |
+| `integrator` | `dt` | ~0.102 | Timestep in code units (default ≈ 1 Myr; 1000 steps/Gyr) |
+| `integrator` | `n_steps` | 5000 | Number of steps (default 5 Gyr at 1000 steps/Gyr) |
 | `parallel` | `enabled` | false | Enable multiprocessing |
 | `parallel` | `n_workers` | 1 | Worker count |
 | `parallel` | `mode` | `mpi` | Parallel backend (`mpi` recommended) |
@@ -114,11 +114,12 @@ Set per-particle values via a sidecar file and `"softening": {"per_particle": tr
 
 ## MPI parallel forces (Gadget-2 style)
 
-Parallel force evaluation uses **mpi4py** (Python MPI bindings), not process
-forking. Install with:
+Parallel force evaluation uses **mpi4py** (installed by default with ntropy).
+`make install-dev` also installs system OpenMPI (`openmpi-bin`, `libopenmpi-dev`)
+when missing. Rebuild mpi4py after installing OpenMPI if import fails:
 
 ```bash
-pip install "ntropy[mpi]"
+pip install --force-reinstall mpi4py
 ```
 
 Launch multi-rank runs with:

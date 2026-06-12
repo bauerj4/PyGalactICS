@@ -10,13 +10,16 @@ from ntropy.softening import pairwise_softening
 from ntropy.units import G
 
 
+_MIN_LEAF_SIZE = 1e-12
+
+
 @dataclass
 class OctreeNode:
     center: np.ndarray
     size: float
     mass: float = 0.0
     com: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    particle_index: int = -1
+    leaf_particles: list[int] = field(default_factory=list)
     children: list[OctreeNode | None] = field(default_factory=lambda: [None] * 8)
     is_leaf: bool = True
 
@@ -26,7 +29,7 @@ class OctreeNode:
             "size": self.size,
             "mass": self.mass,
             "com": self.com,
-            "particle_index": self.particle_index,
+            "leaf_particles": self.leaf_particles,
             "children": self.children,
             "is_leaf": self.is_leaf,
         }
@@ -36,7 +39,7 @@ class OctreeNode:
         self.size = state["size"]
         self.mass = state["mass"]
         self.com = state["com"]
-        self.particle_index = state["particle_index"]
+        self.leaf_particles = state["leaf_particles"]
         self.children = state["children"]
         self.is_leaf = state["is_leaf"]
 
@@ -104,23 +107,55 @@ class BarnesHutTree:
         self._aggregate(root)
         return root
 
+    def _update_leaf(self, node: OctreeNode) -> None:
+        """Recompute leaf mass and center of mass from ``leaf_particles``."""
+        if not node.leaf_particles:
+            node.mass = 0.0
+            node.com = node.center.copy()
+            return
+        masses = self.mass[node.leaf_particles]
+        node.mass = float(masses.sum())
+        if node.mass > 0:
+            weighted = np.sum(
+                masses[:, None] * self.pos[node.leaf_particles],
+                axis=0,
+            )
+            node.com = weighted / node.mass
+        else:
+            node.com = self.pos[node.leaf_particles[0]].copy()
+
+    def _coincident_in_leaf(self, node: OctreeNode, particle_index: int) -> bool:
+        point = self.pos[particle_index]
+        tol = max(1e-15, 1e-9 * node.size)
+        for idx in node.leaf_particles:
+            if np.linalg.norm(point - self.pos[idx]) <= tol:
+                return True
+        return False
+
     def _insert(self, node: OctreeNode, particle_index: int) -> None:
         point = self.pos[particle_index]
         if node.is_leaf:
-            if node.particle_index < 0:
-                node.particle_index = particle_index
-                node.mass = self.mass[particle_index]
-                node.com = self.pos[particle_index].copy()
+            if not node.leaf_particles:
+                node.leaf_particles.append(particle_index)
+                self._update_leaf(node)
                 return
-            existing = node.particle_index
+            if self._coincident_in_leaf(node, particle_index) or node.size <= _MIN_LEAF_SIZE:
+                node.leaf_particles.append(particle_index)
+                self._update_leaf(node)
+                return
+            to_insert = list(node.leaf_particles) + [particle_index]
+            node.leaf_particles = []
             node.is_leaf = False
-            node.particle_index = -1
             node.mass = 0.0
             node.com = np.zeros(3)
-            self._insert(node, existing)
-            self._insert(node, particle_index)
+            for idx in to_insert:
+                self._insert_child(node, idx)
             return
 
+        self._insert_child(node, particle_index)
+
+    def _insert_child(self, node: OctreeNode, particle_index: int) -> None:
+        point = self.pos[particle_index]
         child_idx = _child_index(node.center, point)
         if node.children[child_idx] is None:
             node.children[child_idx] = OctreeNode(
@@ -131,9 +166,7 @@ class BarnesHutTree:
 
     def _aggregate(self, node: OctreeNode) -> None:
         if node.is_leaf:
-            if node.particle_index >= 0:
-                node.mass = self.mass[node.particle_index]
-                node.com = self.pos[node.particle_index].copy()
+            self._update_leaf(node)
             return
         total_mass = 0.0
         com = np.zeros(3)
@@ -179,18 +212,17 @@ class BarnesHutTree:
         target_pos = pos[target_index]
         dr = node.com - target_pos
         dist = np.sqrt(np.sum(dr * dr))
-        if dist == 0 and node.is_leaf and node.particle_index == target_index:
-            return
-
         if node.is_leaf:
-            if node.particle_index == target_index:
-                return
-            source = node.particle_index
-            r_vec = pos[source] - target_pos
-            r2 = np.sum(r_vec * r_vec)
-            h = 0.5 * (eps[target_index] + eps[source])
-            denom = (r2 + h * h) ** 1.5
-            acc += G * self.mass[source] * r_vec / denom
+            for source in node.leaf_particles:
+                if source == target_index:
+                    continue
+                r_vec = pos[source] - target_pos
+                r2 = np.sum(r_vec * r_vec)
+                if r2 == 0:
+                    continue
+                h = 0.5 * (eps[target_index] + eps[source])
+                denom = (r2 + h * h) ** 1.5
+                acc += G * self.mass[source] * r_vec / denom
             return
 
         if node.size / max(dist, 1e-30) < theta:

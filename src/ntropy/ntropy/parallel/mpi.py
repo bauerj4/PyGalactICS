@@ -8,6 +8,7 @@ import numpy as np
 
 from ntropy.forces.brute import compute_forces_brute
 from ntropy.forces.bhtree import BarnesHutTree, compute_forces_bh
+from ntropy.forces.bhtree_c import BarnesHutTreeC, extension_available
 from ntropy.parallel.domains import domain_slices, sort_by_peano
 
 _MPI_COMM = None
@@ -39,7 +40,7 @@ def compute_forces_mpi(
     mass: np.ndarray,
     eps: np.ndarray,
     *,
-    method: Literal["brute", "bh"] = "bh",
+    method: Literal["brute", "bh", "bh_c"] = "bh",
     theta: float = 0.5,
     comm=None,
 ) -> np.ndarray:
@@ -62,8 +63,8 @@ def compute_forces_mpi(
         Particle masses.
     eps : ndarray, shape (N,)
         Per-particle softening lengths.
-    method : {'brute', 'bh'}
-        Force evaluation backend.
+    method : {'brute', 'bh', 'bh_c'}
+        Force evaluation backend (``bh_c`` uses packed C tree broadcast).
     theta : float
         Barnes–Hut opening angle (ignored for brute force).
     comm : MPI communicator, optional
@@ -101,13 +102,26 @@ def compute_forces_mpi(
     slices = domain_slices(n, size)
     local_targets = order[slices[rank]]
 
-    tree = None
     if method == "bh":
-        if rank == 0:
-            tree = BarnesHutTree(pos, mass, eps)
+        tree = BarnesHutTree(pos, mass, eps) if rank == 0 else None
         tree = comm.bcast(tree, root=0)
         local_acc = compute_forces_bh(
             pos, mass, eps, theta=theta, tree=tree, target_indices=local_targets
+        )
+    elif method == "bh_c":
+        if not extension_available():
+            raise ImportError(
+                "force.method 'bh_c' requires the C Barnes–Hut extension. "
+                "Reinstall with: pip install -e src/ntropy"
+            )
+        packed = None
+        if rank == 0:
+            tree_c = BarnesHutTreeC.build(pos, mass, eps)
+            packed = tree_c.pack_buffers()
+        packed = comm.bcast(packed, root=0)
+        tree_c = BarnesHutTreeC.from_packed(packed)
+        local_acc = tree_c.accel_targets(
+            local_targets, theta, pos=pos, eps=eps
         )
     else:
         local_acc = compute_forces_brute(
@@ -128,10 +142,17 @@ def _serial_forces(
     mass: np.ndarray,
     eps: np.ndarray,
     *,
-    method: Literal["brute", "bh"],
+    method: Literal["brute", "bh", "bh_c"],
     theta: float,
 ) -> np.ndarray:
     if method == "brute":
         return compute_forces_brute(pos, mass, eps)
+    if method == "bh_c":
+        if not extension_available():
+            raise ImportError(
+                "force.method 'bh_c' requires the C Barnes–Hut extension. "
+                "Reinstall with: pip install -e src/ntropy"
+            )
+        return BarnesHutTreeC.build(pos, mass, eps).accel_all(theta, pos=pos, eps=eps)
     tree = BarnesHutTree(pos, mass, eps)
     return compute_forces_bh(pos, mass, eps, theta=theta, tree=tree)

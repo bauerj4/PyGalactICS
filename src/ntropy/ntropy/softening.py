@@ -69,6 +69,49 @@ def softened_acceleration_vectorized(
     return acc
 
 
+def softened_acceleration_targets(
+    pos: np.ndarray,
+    mass: np.ndarray,
+    eps: np.ndarray,
+    target_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Vectorized softened acceleration for a subset of target particles.
+
+    Parameters
+    ----------
+    pos : ndarray, shape (N, 3)
+        Particle positions.
+    mass : ndarray, shape (N,)
+        Particle masses.
+    eps : ndarray, shape (N,)
+        Softening lengths.
+    target_indices : ndarray, shape (N_t,)
+        Indices of particles to evaluate.
+
+    Returns
+    -------
+    acc : ndarray, shape (N_t, 3)
+        Accelerations on the requested targets only.
+
+    Notes
+    -----
+    Complexity is O(N_t × N).  Self-interactions are excluded.
+    """
+    targets = np.asarray(target_indices, dtype=int)
+    t_pos = pos[targets]
+    t_eps = eps[targets]
+    dr = t_pos[:, None, :] - pos[None, :, :]
+    r2 = np.sum(dr * dr, axis=2)
+    h_ij = 0.5 * (t_eps[:, None] + eps[None, :])
+    h2 = h_ij**2
+    denom = (r2 + h2) ** 1.5
+    rows = np.arange(len(targets))
+    denom[rows, targets] = np.inf
+    factor = G * mass[None, :] / denom
+    return -(factor[..., None] * dr).sum(axis=1)
+
+
 def softened_potential_energy(
     pos: np.ndarray,
     mass: np.ndarray,

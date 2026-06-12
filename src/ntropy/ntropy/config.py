@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Union
 
+from ntropy.units import (
+    DEFAULT_SIM_DT,
+    DEFAULT_SIM_N_STEPS,
+    format_simulation_duration,
+)
+
 PathLike = Union[str, Path]
 
 
@@ -24,7 +30,7 @@ class SofteningConfig:
 
 @dataclass
 class ForceConfig:
-    method: Literal["brute", "bh"] = "bh"
+    method: Literal["brute", "bh", "bh_c"] = "bh"
     theta: float = 0.5
 
 
@@ -35,8 +41,8 @@ IntegratorType = Literal["leapfrog", "euler", "rk2", "rk3", "rk4"]
 class IntegratorConfig:
     type: IntegratorType = "leapfrog"
     order: Literal[1, 2] = 2
-    dt: float = 0.01
-    n_steps: int = 100
+    dt: float = DEFAULT_SIM_DT
+    n_steps: int = DEFAULT_SIM_N_STEPS
 
 
 @dataclass
@@ -76,6 +82,39 @@ class RunConfig:
         if path.is_absolute():
             return path
         return self.base_dir / path
+
+
+def format_run_config(cfg: RunConfig, *, label: str | None = None) -> str:
+    """
+    Human-readable summary of a run configuration.
+
+    Parameters
+    ----------
+    cfg : RunConfig
+        Run configuration.
+    label : str, optional
+        Short name for this run (shown as a header).
+
+    Returns
+    -------
+    text : str
+        Multi-line summary suitable for logging or notebook output.
+    """
+    integ = cfg.integrator
+    order_note = f", order={integ.order}" if integ.type == "leapfrog" else ""
+    parallel = "on" if cfg.parallel.enabled else "off"
+    duration = format_simulation_duration(integ.dt, integ.n_steps)
+    lines = [
+        f"=== {label} ===" if label else "=== ntropy run ===",
+        f"  integrator : {integ.type}{order_note}",
+        f"  dt         : {integ.dt:.5f} code units",
+        f"  n_steps    : {integ.n_steps}",
+        f"  duration   : {duration}",
+        f"  force      : {cfg.force.method} (theta={cfg.force.theta})",
+        f"  parallel   : {parallel}",
+        f"  seed       : {cfg.seed}",
+    ]
+    return "\n".join(lines)
 
 
 def _require(data: dict[str, Any], key: str, ctx: str) -> Any:
@@ -133,8 +172,10 @@ def load_config(path: PathLike) -> RunConfig:
     ana_raw = raw.get("analysis", {})
 
     method = force_raw.get("method", "bh")
-    if method not in ("brute", "bh"):
-        raise ValueError(f"force.method must be 'brute' or 'bh', got {method!r}")
+    if method not in ("brute", "bh", "bh_c"):
+        raise ValueError(
+            f"force.method must be 'brute', 'bh', or 'bh_c', got {method!r}"
+        )
 
     integ_type = integ_raw.get("type", "leapfrog")
     valid_types = ("leapfrog", "euler", "rk2", "rk3", "rk4")
@@ -176,8 +217,14 @@ def load_config(path: PathLike) -> RunConfig:
         integrator=IntegratorConfig(
             type=integ_type,  # type: ignore[arg-type]
             order=integ_order,  # type: ignore[arg-type]
-            dt=_validate_positive("integrator.dt", float(integ_raw.get("dt", 0.01))),
-            n_steps=int(_validate_positive("integrator.n_steps", float(integ_raw.get("n_steps", 100)), allow_zero=False)),
+            dt=_validate_positive("integrator.dt", float(integ_raw.get("dt", DEFAULT_SIM_DT))),
+            n_steps=int(
+                _validate_positive(
+                    "integrator.n_steps",
+                    float(integ_raw.get("n_steps", DEFAULT_SIM_N_STEPS)),
+                    allow_zero=False,
+                )
+            ),
         ),
         parallel=ParallelConfig(
             enabled=bool(par_raw.get("enabled", False)),

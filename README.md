@@ -144,7 +144,7 @@ From the repository root:
 | Target | Description |
 |--------|-------------|
 | `make help` | List targets |
-| `make install-dev` | Venv, `pip install -e ".[dev]"`, generate test artifacts |
+| `make install-dev` | Venv, galacticsics + ntropy (incl. mpi4py), OpenMPI if available, generate test artifacts |
 | `make generate-artifacts` | Run `dbh` + `diskdf` + sampling → `tests/generated/reference/` |
 | `make legacy-build` | Compile `legacy/fortran` → `legacy/bin/` |
 | `make test` | Run pytest |

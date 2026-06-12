@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from ntropy.softening import softened_acceleration_vectorized
+from ntropy.softening import (
+    softened_acceleration_targets,
+    softened_acceleration_vectorized,
+)
 
 
 def compute_forces_brute(
@@ -40,5 +43,4 @@ def compute_forces_brute(
     if target_indices is None:
         return softened_acceleration_vectorized(pos, mass, eps)
 
-    full = softened_acceleration_vectorized(pos, mass, eps)
-    return full[target_indices]
+    return softened_acceleration_targets(pos, mass, eps, target_indices)

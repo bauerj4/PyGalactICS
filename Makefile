@@ -13,13 +13,14 @@ PIP    = $(VENV)/bin/pip
 PYTEST = $(VENV)/bin/pytest
 PY     = $(VENV)/bin/python
 
-.PHONY: all install-dev generate-artifacts legacy-build legacy-samplers legacy-clean test example-mw example-sample example-halo-first clean help
+.PHONY: all install-dev install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test example-mw example-sample example-halo-first clean help
 
 all: install-dev legacy-build
 
 help:
 	@echo "Targets:"
-	@echo "  install-dev    Create .venv, install galacticsics + ntropy, generate test artifacts"
+	@echo "  install-dev    Create .venv, install galacticsics + ntropy (+ mpi4py/OpenMPI), generate test artifacts"
+	@echo "  install-system-mpi  Install OpenMPI system packages for mpi4py (Debian/dnf/Homebrew)"
 	@echo "  generate-artifacts  Run dbh+diskdf+sampling -> tests/generated/reference"
 	@echo "  legacy-build   Build dbh -> legacy/bin/"
 	@echo "  legacy-samplers Build gendisk, genhalo, genbulge, diskdf, getfreqs"
@@ -30,11 +31,17 @@ help:
 	@echo "  example-halo-first Run examples/halo_first_workflow.py"
 	@echo "  clean          Remove .venv artifacts and legacy object files"
 
-$(VENV)/bin/activate:
+install-system-mpi:
+	@bash scripts/ensure_openmpi.sh || true
+
+$(VENV)/bin/activate: install-system-mpi
 	$(PYTHON) -m venv $(VENV)
 	$(PIP) install -U pip
 	$(PIP) install -e ".[dev]"
 	$(PIP) install -e "src/ntropy[dev]"
+	@$(PIP) install --force-reinstall --no-cache-dir mpi4py
+	@$(PY) -c "from mpi4py import MPI; print('mpi4py OK (COMM_WORLD size =', MPI.COMM_WORLD.Get_size(), ')')" \
+		|| echo "WARNING: mpi4py import failed. Install OpenMPI (make install-system-mpi or sudo apt install openmpi-bin libopenmpi-dev) then: pip install --force-reinstall mpi4py"
 
 install-dev: $(VENV)/bin/activate generate-artifacts
 
@@ -43,7 +50,7 @@ generate-artifacts: legacy-build legacy-samplers
 
 legacy-build:
 	@if command -v make >/dev/null 2>&1; then \
-		$(MAKE) -C legacy/fortran dbh && cp legacy/fortran/dbh legacy/bin/; \
+		$(MAKE) -C legacy/fortran dbh && bash scripts/install_binary.sh legacy/fortran/dbh legacy/bin/dbh; \
 	else \
 		./scripts/build_legacy_nmake.sh; \
 	fi

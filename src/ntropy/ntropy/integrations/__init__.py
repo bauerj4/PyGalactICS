@@ -5,6 +5,7 @@ from ntropy.integrations.galacticsics import (
     galacticsics_available,
     merge_galacticsics_components,
     nfw_halo_model_fast,
+    nfw_halo_model_production,
     particle_state_from_galacticsics,
     require_galacticsics,
     sample_galacticsics_galaxy,
@@ -18,6 +19,7 @@ __all__ = [
     "particle_state_from_galacticsics",
     "merge_galacticsics_components",
     "nfw_halo_model_fast",
+    "nfw_halo_model_production",
     "sample_galacticsics_halo",
     "sample_galacticsics_galaxy",
 ]

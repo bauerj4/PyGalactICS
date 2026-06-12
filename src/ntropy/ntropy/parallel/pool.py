@@ -14,7 +14,7 @@ def compute_forces_parallel(
     mass: np.ndarray,
     eps: np.ndarray,
     *,
-    method: Literal["brute", "bh"] = "bh",
+    method: Literal["brute", "bh", "bh_c"] = "bh",
     theta: float = 0.5,
     n_workers: int = 1,
 ) -> np.ndarray:
@@ -29,8 +29,8 @@ def compute_forces_parallel(
         Particle masses.
     eps : ndarray, shape (N,)
         Softening lengths.
-    method : {'brute', 'bh'}
-        Force backend.
+    method : {'brute', 'bh', 'bh_c'}
+        Force backend (``bh_c`` uses the C Barnes–Hut extension).
     theta : float
         Barnes–Hut opening angle.
     n_workers : int

@@ -7,8 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from ntropy.config import RunConfig
+from ntropy.config import RunConfig, format_run_config
 from ntropy.forces.bhtree import BarnesHutTree, compute_forces_bh
+from ntropy.forces.bhtree_c import compute_forces_bh_c
 from ntropy.forces.brute import compute_forces_brute
 from ntropy.integrators.euler import euler_step
 from ntropy.integrators.leapfrog import leapfrog1_step, leapfrog_step
@@ -16,6 +17,7 @@ from ntropy.integrators.rk import rk2_step, rk3_step, rk4_step
 from ntropy.parallel.pool import compute_forces_parallel
 from ntropy.particles import ParticleState
 from ntropy.softening import total_energy
+from ntropy.units import code_time_to_gyr, code_time_to_myr
 
 
 @dataclass
@@ -91,6 +93,13 @@ class Simulation:
             )
         if cfg.force.method == "brute":
             return compute_forces_brute(pos, mass, eps)
+        if cfg.force.method == "bh_c":
+            return compute_forces_bh_c(
+                pos,
+                mass,
+                eps,
+                theta=cfg.force.theta,
+            )
         tree = BarnesHutTree(pos, mass, eps)
         return compute_forces_bh(
             pos,
@@ -151,9 +160,24 @@ class Simulation:
         self.state.pos = pos_new
         self.state.vel = vel_new
 
-    def run(self) -> SimulationResult:
+    def run(
+        self,
+        *,
+        show_progress: bool = False,
+        progress_desc: str | None = None,
+        print_config: bool = False,
+    ) -> SimulationResult:
         """
         Run the full simulation loop from the current configuration.
+
+        Parameters
+        ----------
+        show_progress : bool
+            Display a tqdm progress bar over timesteps when ``tqdm`` is installed.
+        progress_desc : str, optional
+            Label shown on the progress bar.
+        print_config : bool
+            Print a human-readable summary of run parameters before integrating.
 
         Returns
         -------
@@ -161,6 +185,9 @@ class Simulation:
             Initial/final states, energy history, and output path.
         """
         cfg = self.config
+        if print_config or show_progress:
+            print(format_run_config(cfg, label=progress_desc))
+
         state = self.state.copy()
         state.remove_center_of_mass()
         energies: list[float] = []
@@ -176,13 +203,44 @@ class Simulation:
         if cfg.output.every > 0:
             state.write_ascii(output_dir / "snapshot_0000.dat")
 
-        for step in range(1, cfg.integrator.n_steps + 1):
+        step_iter: range | object = range(1, cfg.integrator.n_steps + 1)
+        if show_progress:
+            try:
+                from tqdm.auto import tqdm
+            except ImportError as exc:
+                raise ImportError(
+                    "show_progress=True requires tqdm. Install with: pip install tqdm"
+                ) from exc
+            step_iter = tqdm(
+                step_iter,
+                desc=progress_desc or "ntropy simulation",
+                unit="step",
+                total=cfg.integrator.n_steps,
+                mininterval=0.5,
+            )
+
+        dt = cfg.integrator.dt
+        for step in step_iter:
             self.state = state
             self.step()
             state = self.state
-            energies.append(
-                total_energy(state.pos, state.vel, state.mass, state.eps)
-            )
+            energy = total_energy(state.pos, state.vel, state.mass, state.eps)
+            energies.append(energy)
+            if show_progress and hasattr(step_iter, "set_postfix"):
+                e0 = max(abs(energies[0]), 1e-30)
+                t_code = step * dt
+                step_iter.set_postfix(
+                    t_Gyr=f"{code_time_to_gyr(t_code):.3f}",
+                    t_Myr=f"{code_time_to_myr(t_code):.0f}",
+                    dE=f"{abs(energy - energies[0]) / e0:.2e}",
+                    refresh=False,
+                )
+            if show_progress and hasattr(step_iter, "set_description"):
+                pct = 100.0 * step / cfg.integrator.n_steps
+                step_iter.set_description(
+                    f"{progress_desc or 'ntropy simulation'} ({pct:.1f}%)",
+                    refresh=False,
+                )
             if cfg.output.every > 0 and step % cfg.output.every == 0:
                 state.write_ascii(output_dir / f"snapshot_{step:04d}.dat")
 
