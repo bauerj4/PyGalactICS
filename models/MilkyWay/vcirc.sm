@@ -1,0 +1,25 @@
+erase
+lweight 3
+data vcirc.out
+read {r 1 t 2 h 3 b 4 d1 5 d2 6 g 7 tt 8}
+
+limits -.3 25 0 3
+ctype 0 ltype 0
+box
+connect r t
+ltype 2
+ctype magenta
+connect r tt
+ltype 0
+ctype red
+connect r d1
+ltype 1
+connect r d2
+ltype 2
+connect r g
+ltype 0
+ctype blue
+connect r b
+ctype green
+connect r h
+

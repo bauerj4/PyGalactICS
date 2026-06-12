@@ -1,0 +1,18 @@
+erase
+ctype yellow
+data checkdensgas
+read {a 1 b 2 c 3}
+set a = ln(a)
+set b = ln(b)
+set c = ln(c)
+limits a 0 10
+box
+connect a c
+ctype blue
+data checkdens
+read {a 1 b 2 c 3}
+set a = ln(a)
+set b = ln(b)
+set c = ln(c)
+connect a c
+

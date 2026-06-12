@@ -1,0 +1,22 @@
+erase
+ctype red
+
+data disk
+lines 2 100000
+read {x 2 y 3 u 5 v 6}
+set r = sqrt(x*x + y*y)
+set s = (x*v - y*u)/r
+data disk2
+lines 2 100000
+read {xx 2 yy 3 uu 5 vv 6}
+set rr = sqrt(xx*xx + yy*yy)
+set ss = (xx*vv - yy*uu)/rr
+
+limits r s
+ctype 0
+box
+ptype 1 1
+points r s
+ctype yellow
+points rr ss
+

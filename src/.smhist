@@ -1,0 +1,6 @@
+device X11
+data diskring
+quit
+device X11
+data gasdisk
+quit

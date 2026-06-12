@@ -1,0 +1,41 @@
+erase
+lweight 3
+ctype 0
+expand 1.3
+
+location 4000 15000 22000 31000
+limits -1 21 -.05 .8
+ticksize 1 5 .1 .2
+
+ctype 0
+data profiles.out
+read {r 1 z 3 w 5 vc 6 vr 8 sd 9}
+
+box 0 2 0 0
+connect r z
+
+location 4000 15000 13000 22000
+limits -1 21 0 80
+ticksize 1 5 5 20
+box 
+connect r w
+
+location 19000 30000 22000 31000
+limits -1 21 185 255
+ticksize 1 5 5 20
+box 0 2 0 0
+connect r vc
+
+location 19000 30000 13000 22000
+set sd = lg(sd)
+ticksize 1 5 -1 10
+limits -1 21 -5.2 -.5
+box 
+connect r sd
+
+location 19000 30000 4000 13000
+ticksize 1 5 10 50
+limits -1 21 0 100
+box 
+connect r vr
+

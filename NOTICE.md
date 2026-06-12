@@ -1,0 +1,1 @@
+Implementation of algorithm proposed by Lawrence Widrow, John Dubinski, Koen Kuijken (2008). Further developed by Nathan Deg, and reimplemented in Python by Jake Bauer (2024).

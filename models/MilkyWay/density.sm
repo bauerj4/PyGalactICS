@@ -1,0 +1,66 @@
+erase
+lweight 3
+
+limits -1.5 3 -7 1
+ctype 0
+box
+
+data halodensity.out
+read {a 1 b 2 c 3}
+set a = lg(a)
+
+ctype red
+ltype 0
+connect a b
+ltype 1
+connect a c
+
+data halodensity.old
+read {a 1 b 2 c 3}
+set a = lg(a)
+
+ctype yellow
+connect a b
+
+data bulgedensity.out
+read {a 1 b 2 c 3}
+set a = lg(a)
+
+ctype blue
+ltype 0
+connect a b
+ltype 1
+connect a c
+
+data bulgedensity.old
+read {a 1 b 2 c 3}
+set a = lg(a)
+
+ctype yellow
+connect a b
+
+data gasdensity.out
+read {a 1 b 2 c 3 d 4}
+set a = lg(a)
+
+ctype green
+ltype 0
+connect a b
+ltype 1
+connect a c
+ctype 0
+ltype 0
+connect a d
+
+data diskdensity.out
+read {a 1 b 2 c 3 d 4}
+set a = lg(a)
+
+ctype yellow
+connect a b
+ctype magenta
+connect a c
+ctype 0
+ltype 1
+connect a d
+

@@ -1,0 +1,17 @@
+erase
+ctype 0
+data scaleheight.out
+location 8000 26000 22000 30000
+read {r 1 z 2 dz 3 d2z 4}
+limits 0 30 z
+connect r z
+box 0 2 0 0
+limits 0 30 dz
+location 8000 26000 14000 22000
+box 0 2 0 0 
+connect r dz
+box
+location 8000 26000 6000 14000
+limits 0 30 d2z
+connect r d2z
+box

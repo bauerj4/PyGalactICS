@@ -1,0 +1,64 @@
+# --- Python environment & packaging ---
+.venv/
+venv/
+env/
+
+# --- Build / install artifacts ---
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Bytecode & caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# --- Source package (`src/galacticsics/`) ---
+# Keep Python sources; ignore generated install metadata and caches.
+src/**/__pycache__/
+src/**/*.py[cod]
+src/**/*.egg-info/
+src/**/.mypy_cache/
+src/**/.ruff_cache/
+
+# --- Generated test artifacts (produced by `make generate-artifacts`) ---
+tests/generated/
+
+# --- Milky Way reference model: inputs only (solver/sampler outputs are local) ---
+models/MilkyWay/**
+!models/MilkyWay/makefile
+!models/MilkyWay/in.*
+!models/MilkyWay/*.py
+!models/MilkyWay/*.f
+!models/MilkyWay/*.sm
+!models/MilkyWay/param
+!models/MilkyWay/gasnorm
+!models/MilkyWay/commonblocks
+!models/MilkyWay/equivalence
+!models/MilkyWay/check
+!models/MilkyWay/diskprofiles
+
+# --- Legacy Fortran/C tree (build with `make legacy-build`; not versioned) ---
+# Note: `src/galacticsics/legacy/` is the Python subprocess bridge and IS tracked.
+legacy/
+
+# --- Editor / OS ---
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- Sphinx docs ---
+docs/_build/

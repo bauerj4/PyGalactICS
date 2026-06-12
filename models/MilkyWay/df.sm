@@ -1,0 +1,7 @@
+erase
+data dfhalo.table
+read {a 1 b 2}
+set b = ln(b)
+limits a b
+box
+connect a b
