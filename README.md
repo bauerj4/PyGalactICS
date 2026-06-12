@@ -8,13 +8,20 @@ This repository separates the **modern Python API** (`src/galacticsics/`) from
 the **original Fortran/C implementation** (`legacy/`), connected only through
 documented subprocess runners and file formats.
 
+A sibling package **`ntropy`** (`src/ntropy/`) evolves those initial conditions
+with a short self-gravitating N-body test (brute, Python/C Barnes–Hut, MPI,
+multiple integrators). The notebook
+[`nfw_halo_walkthrough.ipynb`](notebooks/nfw_halo_walkthrough.ipynb) demonstrates
+the full **GalactICS IC → ntropy stability** pipeline.
+
 ## Repository layout
 
 ```
 GalactICSIsoWithGas/
 ├── src/galacticsics/       # Python package (public API)
-├── src/ntropy/             # Minimal N-body IC tester (separate package)
-│   ├── models.py           # GalaxyModel, NFWHalo, ExponentialDisk, …
+├── src/ntropy/             # N-body IC stability tester (separate package)
+│   ├── ntropy/forces/c/    # C Barnes–Hut octree (_bh_c extension)
+│   ├── ntropy/benchmark/   # MPI subprocess workers, timing breakdowns
 │   ├── potential/          # HarmonicPotential, evaluate, solve_potential
 │   ├── distribution/       # Disk DF corrections, epicycle tables
 │   ├── sampling/           # ParticleSet
@@ -35,25 +42,117 @@ GalactICSIsoWithGas/
 └── pyproject.toml
 ```
 
-## ntropy (N-body IC tester)
+## ntropy (N-body IC stability tester)
 
-The sibling package **[`src/ntropy/`](src/ntropy/)** provides a minimal self-gravitating
-N-body integrator for short stability checks on initial conditions. It reads the same
-GalactICS ASCII particle format, supports brute-force and Barnes–Hut forces, variable
-softening, JSON-driven runs, and MPI parallel forces (mpi4py). Installed automatically by
-`make install-dev`. See [`src/ntropy/README.md`](src/ntropy/README.md) for full
-documentation.
+The sibling package **[`src/ntropy/`](src/ntropy/)** is a self-gravitating N-body
+integrator for **short equilibrium checks** on GalactICS (or analytic) initial
+conditions. It answers: *does ρ(r) and |ΔE/E₀| stay reasonable over a few Gyr of
+evolution?* It is not a production cosmology code.
+
+Installed automatically by `make install-dev` (compiles the optional C extension).
+Package-level API docs: [`src/ntropy/README.md`](src/ntropy/README.md).
+
+### Capabilities (current)
+
+| Area | Details |
+|------|---------|
+| **Particle I/O** | GalactICS ASCII (`mass x y z vx vy vz`); optional `nobj flag` header |
+| **Softening** | Per-particle Plummer; pairwise \(h_{ij} = \tfrac{1}{2}(\varepsilon_i+\varepsilon_j)\) |
+| **Forces** | `brute` (vectorized O(N²)), `bh` (pure-Python octree), **`bh_c`** (C octree) |
+| **Integrators** | Leapfrog orders 1–2 (symplectic); Euler, RK2, RK3, RK4 (explicit, non-symplectic) |
+| **Parallelism** | mpi4py Morton (Z-order) domain decomposition; Gadget-2-style assignment |
+| **MPI BH** | Python: `bcast` tree object; **C**: rank-0 `pack_buffers` → flat `(n_nodes, 19)` broadcast → `from_packed` |
+| **Config** | JSON runs (`ntropy-run`); default **5 Gyr** at **1000 steps/Gyr** (Δt ≈ 0.102 code units ≈ 1 Myr) |
+| **IC models** | Plummer, truncated NFW, Sersic bulge, exponential disk, composites |
+| **galacticsics bridge** | `sample_galacticsics_halo` / `sample_galacticsics_galaxy` → `Simulation` |
+| **Analysis** | Spherical ρ(r), disk Σ(R), energy drift, density stability assertions |
+
+### Force backends
+
+**Brute force** (`force.method: "brute"`) — NumPy pairwise kernel; exact reference for
+small N and validation.
+
+**Python Barnes–Hut** (`force.method: "bh"`) — Monopole octree in pure Python; rebuilt
+every force call. Accurate but slow at notebook scales (timed up to N = 4096 in §4); useful for debugging.
+
+**C Barnes–Hut** (`force.method: "bh_c"`) — Same physics as Python BH, implemented in
+`src/ntropy/ntropy/forces/c/bh_tree.c` and exposed via `bhtree_c.py`. Built on
+`pip install -e src/ntropy` (requires gcc + NumPy headers). MPI path documented in
+[`forces/c/PARALLEL.md`](src/ntropy/ntropy/forces/c/PARALLEL.md).
+
+```python
+from ntropy.forces.bhtree_c import BarnesHutTreeC, compute_forces_bh_c, extension_available
+
+if extension_available():
+    tree = BarnesHutTreeC.build(pos, mass, eps)
+    acc = tree.accel_all(theta=0.5)
+    packed = tree.pack_buffers()  # MPI broadcast payload
+```
+
+### Time units
+
+GalactICS code time: **1 unit ≈ 9.78 Myr ≈ 0.0098 Gyr** (1 kpc / (100 km/s)).
+Defaults: `dt ≈ 0.102`, `n_steps = 5000` → **5 Gyr** total. Helpers in
+`ntropy.units` (`code_time_to_gyr`, `format_simulation_duration`, etc.).
+
+### MPI usage
+
+```bash
+# Single-rank (falls back to serial kernels)
+ntropy-run src/ntropy/configs/plummer_short.json
+
+# Multi-rank domain decomposition
+mpirun -n 4 ntropy-run src/ntropy/configs/plummer_short.json
+```
+
+`make install-dev` attempts to install OpenMPI (`scripts/ensure_openmpi.sh`) and
+rebuilds mpi4py. Launch simulations under `mpirun` for parallel force evaluation;
+progress and |ΔE/E₀| print on rank 0 when using the MPI simulation worker.
+
+### Integrated GalactICS → ntropy workflow
+
+```python
+from ntropy.config import ForceConfig, IntegratorConfig, ParallelConfig, RunConfig
+from ntropy.integrations.galacticsics import sample_galacticsics_halo, particle_state_from_galacticsics
+from ntropy.simulation import Simulation
+
+cfg = RunConfig(
+    force=ForceConfig(method="bh_c", theta=0.5),
+    integrator=IntegratorConfig(type="leapfrog", order=2),
+    parallel=ParallelConfig(enabled=True, n_workers=8),
+)
+ic = sample_galacticsics_halo(n_particles=1024, seed=42)
+result = Simulation(cfg, state=ic.state).run(show_progress=True)
+```
 
 ## Notebooks
 
-Tutorial walkthroughs live in [`notebooks/`](notebooks/). Start with
-[`nfw_halo_walkthrough.ipynb`](notebooks/nfw_halo_walkthrough.ipynb) — **GalactICS
-IC generation** (`dbh` + `genhalo`) fed into **ntropy**; force accuracy and density
-plots. Generated
-figures and particle files go to `notebooks/artifacts/` (gitignored).
+Tutorial walkthroughs live in [`notebooks/`](notebooks/). Generated figures and
+particle files go to `notebooks/artifacts/` (gitignored).
+
+### [`nfw_halo_walkthrough.ipynb`](notebooks/nfw_halo_walkthrough.ipynb)
+
+End-to-end **GalactICS IC → ntropy validation** for a spherical NFW halo:
+
+| Section | Content |
+|---------|---------|
+| **§1** | `GalaxyModel` → legacy `dbh` → `genhalo`; typed Python API |
+| **§2** | Initial ρ(r) vs analytic NFW; sanity check on sampled IC |
+| **§3** | Brute vs Barnes–Hut force accuracy vs opening angle θ |
+| **§4** | Serial/MPI/integrator scaling: brute vs `bh_c` (N and ranks 1–8; leapfrog order 1 vs 2) |
+| **§4b** | Why BH C can lose to brute at N=1024; MPI overhead; brute partial-sum fix |
+| **§4c** | **Python vs C BH** — accuracy check and build/walk timing (`bh` vs `bh_c`) at N=1024 |
+| **§4d** | **Large-N crossover** — force-only timings at N=10⁴ and 10⁵ (C BH vs brute) |
+| **§4e** | **θ sweep** — BH build/walk timing and force accuracy vs opening angle θ |
+| **§5** | 5 Gyr stability run (N=1024, `bh_c`, mpirun -n 4); ρ(r) drift and \|ΔE/E₀\| |
+| **§5b** | Symplectic leapfrog vs explicit Euler/RK energy drift comparison |
+
+Default notebook parameters: **N = 1024**, **Δt ≈ 0.041** code units (~0.4 Myr/step),
+**12 500 steps** (5 Gyr at 2500 steps/Gyr), energy runs via `mpirun -n 4`.
 
 ```bash
-pip install jupyter
+pip install jupyter matplotlib tqdm
+source .venv/bin/activate
 jupyter notebook notebooks/nfw_halo_walkthrough.ipynb
 ```
 
@@ -129,7 +228,7 @@ pip install -U pip && pip install -e ".[dev]"
 make legacy-build legacy-samplers
 galacticsics-generate-artifacts generate   # → tests/generated/reference/
 
-pytest tests/ -v
+pytest tests/ src/ntropy/tests/ -v
 ```
 
 **Test artifacts** are **not** read from `models/MilkyWay/`. They are generated
@@ -144,10 +243,11 @@ From the repository root:
 | Target | Description |
 |--------|-------------|
 | `make help` | List targets |
-| `make install-dev` | Venv, galacticsics + ntropy (incl. mpi4py), OpenMPI if available, generate test artifacts |
+| `make install-dev` | Venv, galacticsics + ntropy (incl. mpi4py, **C BH extension**), OpenMPI if available, generate test artifacts |
+| `make install-system-mpi` | Install OpenMPI packages (`scripts/ensure_openmpi.sh`) |
 | `make generate-artifacts` | Run `dbh` + `diskdf` + sampling → `tests/generated/reference/` |
 | `make legacy-build` | Compile `legacy/fortran` → `legacy/bin/` |
-| `make test` | Run pytest |
+| `make test` | Run `pytest tests/ src/ntropy/tests/` (full galacticsics + ntropy suite) |
 | `make example-mw` | Load Milky Way `dbh.dat`, print potential samples |
 | `make example-solve` | Solve NFW halo via legacy `dbh` |
 | `make example-sample` | Sample 500 disk+halo particles from Milky Way model |
@@ -577,20 +677,260 @@ imposed.
 
 ## Testing
 
+Run the **full suite** (galacticsics + ntropy) from the repository root:
+
 ```bash
-pytest tests/ -v
+make test
+# equivalent to:
+pytest tests/ src/ntropy/tests/ -v --tb=short
 ```
 
-| Test module | Coverage |
-|-------------|----------|
-| `test_io_milkyway.py` | `dbh.dat`, `cordbh.dat`, `mr.dat` round-trip |
-| `test_potential_milkyway.py` | `evaluate_potential` / `evaluate_force` |
-| `test_models_spherical.py` | NFW-only, bulge-only, combined fixtures |
-| `test_sampling_milkyway.py` | Particle mass, kinematics statistics |
-| `test_numerics_parity.py` | SciPy splines vs `cordbh.dat` nodes |
-| `test_legacy_inputs.py` | `in.dbh` generation |
-| `test_halo_first.py` | Halo-first helpers, `h.dat` merge, NFW particle fit |
-| `test_sampling_legacy.py` | `gendisk` / `genhalo` integration |
+**Prerequisites:** `make install-dev` (venv, legacy binaries, generated reference
+artifacts in `tests/generated/reference/`). Some ntropy tests require **mpi4py**
+and **mpirun**; C BH tests require the compiled `_bh_c` extension (skipped if
+missing). MPI multi-rank tests are skipped when `mpirun` is unavailable.
+
+---
+
+### galacticsics tests (`tests/`)
+
+Generated Milky Way reference artifacts drive most integration tests. Regenerate with
+`make generate-artifacts` if hashes drift after model changes.
+
+#### `test_io_milkyway.py` — harmonic potential I/O
+
+| Test | What it checks |
+|------|----------------|
+| `test_read_harmonic_potential_reference` | `dbh.dat` parses; grid dimensions and coefficient arrays load |
+| `test_harmonic_round_trip` | Write/read round-trip preserves multipole coefficients |
+| `test_read_component_masses` | `mr.dat` component masses match manifest |
+| `test_read_disk_correction` | `cordbh.dat` spline correction factors load |
+| `test_read_frequency_table` | `freqdbh.dat` epicyclic frequency tables load |
+| `test_read_rtidal_and_toomre` | Tidal radius and Toomre Q metadata consistent with model |
+| `test_artifact_consistency` | Cross-file consistency (grid, l_max, nr) across artifact set |
+| `test_manifest_matches_model` | Generated manifest matches `GalaxyModel.milky_way_disk_halo()` parameters |
+
+#### `test_potential_milkyway.py` — Python potential evaluator
+
+| Test | What it checks |
+|------|----------------|
+| `test_potential_at_solar_neighborhood` | Ψ(s=8, z=0) in expected range for MW model |
+| `test_force_midplane` | Midplane force components finite and physically signed |
+| `test_circular_velocity_scale` | v_c from force matches expected km/s scale at solar radius |
+| `test_potential_force_consistency` | Numerical ∂Ψ/∂s matches returned force component |
+
+#### `test_models_spherical.py` — model fixtures
+
+| Test | What it checks |
+|------|----------------|
+| `test_nfw_halo_only_fixture` | `GalaxyModel.nfw_halo_only()` enables halo, disables disk/bulge |
+| `test_sersic_bulge_only_fixture` | Bulge-only model flags and parameters |
+| `test_nfw_plus_bulge_fixture` | Combined halo+bulge model construction |
+
+#### `test_sampling_milkyway.py` — particle sampling statistics
+
+| Test | What it checks |
+|------|----------------|
+| `test_disk_particle_mass` | Sampled disk particle masses sum to model disk mass |
+| `test_halo_particle_com_near_origin` | Halo COM near origin after sampling |
+| `test_disk_velocity_dispersion_order_of_magnitude` | σ_R, σ_z order-of-magnitude vs epicyclic expectations |
+
+#### `test_numerics_parity.py` — SciPy vs legacy numerics
+
+| Test | What it checks |
+|------|----------------|
+| `test_cubic_spline_matches_cordbh_nodes` | `CubicSpline` matches `cordbh.dat` node values |
+| `test_legendre_at_mu_one` | SciPy Legendre at μ=1 matches Fortran convention |
+| `test_simpson_integrate_polynomial` | Simpson integrator exact on low-order polynomials |
+
+#### `test_legacy_inputs.py` — stdin file generation
+
+| Test | What it checks |
+|------|----------------|
+| `test_write_dbh_input_milky_way` | Generated `in.dbh` matches Milky Way reference prompts |
+| `test_write_gendenspsi` | Halo density/potential aux input files well-formed |
+
+#### `test_halo_first.py` — two-step halo workflow
+
+| Test | What it checks |
+|------|----------------|
+| `test_model_halo_only_disables_baryons` | `with_halo_only()` disables disk/bulge/gas flags |
+| `test_model_baryons_only_disables_halo` | `with_baryons_only()` disables halo solve |
+| `test_read_halo_harmonics_generated` | `h.dat` from generated halo run parses |
+| `test_merge_harmonics_generated` | Merged baryon+halo harmonics sum correctly |
+| `test_estimate_nfw_from_synthetic_particles` | NFW fit recovers scale radius from synthetic profile |
+| `test_from_physical_matches_reference` | `GalaxyModel.from_physical` matches reference units |
+
+#### `test_builder_milkyway.py` — artifact loading
+
+| Test | What it checks |
+|------|----------------|
+| `test_load_reference_artifacts` | `GalaxyBuilder` loads generated `dbh.dat`, corrections, frequencies |
+| `test_load_reference_particles` | Reference disk/halo particle files load with expected counts |
+
+#### `test_sampling_legacy.py` — legacy executable integration
+
+| Test | What it checks |
+|------|----------------|
+| `test_sample_reference_small` | `gendisk`/`genhalo` subprocess sampling produces valid particle file |
+
+#### `test_units.py` — unit conversions
+
+| Test | What it checks |
+|------|----------------|
+| `test_default_unit_system` | Default `UnitSystem` matches GalactICS conventions |
+| `test_mass_velocity_conversions` | M☉ ↔ code mass, km/s ↔ code velocity |
+| `test_length_conversions` | kpc ↔ code length |
+| `test_from_physical_round_trip` | Physical → internal → physical round-trip |
+| `test_custom_unit_system` | Custom `UnitSystem` scaling |
+
+---
+
+### ntropy tests (`src/ntropy/tests/`)
+
+#### `test_forces.py` — force kernel agreement
+
+| Test | What it checks |
+|------|----------------|
+| `test_brute_bh_agreement` | Python BH accelerations match brute at θ=0.3 (rtol≈15%) |
+| `test_bh_handles_duplicate_positions` | Octree does not overflow when two particles share coordinates |
+| `test_brute_targets_matches_full` | Partial brute sum on target indices matches full-array result |
+| `test_variable_softening_symmetry` | Asymmetric ε_i, ε_j still yields equal-and-opposite pairwise force |
+
+#### `test_bh_c.py` — C Barnes–Hut extension (skipped if `_bh_c` not built)
+
+| Test | What it checks |
+|------|----------------|
+| `test_bh_c_matches_python_bh` | C and Python BH accelerations agree to machine precision |
+| `test_bh_c_matches_brute_small` | C BH matches brute at small N (θ=0.3, rtol≈15%) |
+| `test_bh_c_targets_subset` | `accel_targets` on index subset matches rows of `accel_all` |
+| `test_bh_c_pack_roundtrip` | build → `pack_buffers` → `from_packed` preserves accelerations |
+
+#### `test_softening.py` — Plummer kernel
+
+| Test | What it checks |
+|------|----------------|
+| `test_pairwise_symmetry` | h_ij = h_ji for pairwise softening matrix |
+| `test_acceleration_at_large_distance` | Softened force → Newtonian at r ≫ ε |
+
+#### `test_integrator.py` — leapfrog
+
+| Test | What it checks |
+|------|----------------|
+| `test_leapfrog1_step_matches_symplectic_euler` | Order-1 leapfrog matches symplectic Euler kick-drift |
+| `test_leapfrog2_step_is_velocity_verlet_half_kick` | Order-2 leapfrog matches velocity-Verlet half-kick |
+| `test_two_body_symplectic_energy_preserved` | Softened two-body over **10 Gyr**: circular and mildly eccentric (e=0.1) orbits; leapfrog orders 1–2 |
+| `test_plummer_energy_drift_bounded` | Plummer sphere: \|ΔE/E₀\| bounded over 50 leapfrog steps |
+
+#### `test_explicit_integrators.py` — Euler and Runge–Kutta
+
+| Test | What it checks |
+|------|----------------|
+| `test_euler_step_forward` | Forward Euler advances linear motion correctly |
+| `test_rk_linear_oscillator_converges_with_order` | RK2/RK3/RK4 convergence orders on harmonic oscillator |
+| `test_integrator_metadata` | Registry exposes expected integrator names |
+| `test_euler_energy_drift_exceeds_symplectic_leapfrog` | Non-symplectic Euler drifts more than leapfrog on Plummer |
+
+#### `test_config.py` — JSON schema
+
+| Test | What it checks |
+|------|----------------|
+| `test_load_minimal_config` | Minimal valid JSON loads; defaults for force/integrator |
+| `test_invalid_force_method` | Rejects unknown `force.method` (accepts `brute`, `bh`, `bh_c`) |
+| `test_load_rk4_integrator` | RK4 integrator type loads from JSON |
+| `test_invalid_integrator_type` | Rejects unknown integrator enum |
+| `test_missing_particles_file` | Missing `particles.file` raises clear error |
+
+#### `test_units.py` — simulation time constants
+
+| Test | What it checks |
+|------|----------------|
+| `test_default_simulation_span_is_five_gyr` | Default n_steps × dt spans 5 Gyr |
+| `test_dt_is_one_myr_per_step` | Default dt ≈ 1 Myr in physical units |
+| `test_code_time_per_gyr` | Gyr ↔ code time conversion constants |
+| `test_format_simulation_duration_mentions_gyr` | Human-readable duration string includes Gyr |
+
+#### `test_io.py` — particle file I/O
+
+| Test | What it checks |
+|------|----------------|
+| `test_roundtrip_ascii` | Write/read ASCII preserves pos, vel, mass |
+| `test_skip_header_line` | `nobj flag` header line skipped on read |
+| `test_particle_state_write` | `ParticleState.write_ascii` format compatible with reader |
+
+#### `test_ics_plummer.py` — Plummer IC generator
+
+| Test | What it checks |
+|------|----------------|
+| `test_abel_matches_analytic_plummer_df` | Abel-inversion DF matches analytic Plummer f(E) |
+| `test_plummer_virial_ratio` | Sampled Plummer sphere 2T + \|W\| ≈ 0 (virial equilibrium) |
+
+#### `test_disk_density.py` — exponential disk IC
+
+| Test | What it checks |
+|------|----------------|
+| `test_exponential_disk_volume_density_matches_legacy` | ρ(R,z) matches legacy GalactICS erfc-truncated formula |
+| `test_sampled_disk_matches_target_sigma` | Sampled surface density matches target Σ(R) |
+
+#### `test_ic_composites.py` — multi-component stability
+
+| Test | What it checks |
+|------|----------------|
+| `test_composite_spherical_density_stability` | Halo/bulge/disk combos: ρ(r) drift < 25% after short run |
+| `test_exponential_disk_surface_density_stability` | Disk Σ(R) stable for halo+bulge+disk combinations |
+
+#### `test_reproducibility.py` — deterministic runs
+
+| Test | What it checks |
+|------|----------------|
+| `test_same_seed_same_final_positions` | Identical seed → identical final positions |
+
+#### `test_parallel.py` — MPI force dispatch (requires mpi4py)
+
+| Test | What it checks |
+|------|----------------|
+| `test_mpi_serial_matches_brute` | Single-rank MPI path matches brute force |
+| `test_pool_dispatch_matches_brute` | `compute_forces_parallel` matches brute |
+| `test_mpirun_benchmark_worker` | `mpirun` benchmark worker writes timing JSON (needs `mpirun`) |
+| `test_mpirun_simulation_worker` | MPI simulation worker records energy history (needs `mpirun`) |
+| `test_mpi_bh_c_matches_python_bh` | MPI `bh_c` path matches Python BH reference |
+| `test_mpi_bh_matches_brute` | MPI Python BH matches brute at small N |
+
+#### `test_parallel_density.py` — MPI density evolution (requires mpi4py + mpirun)
+
+| Test | What it checks |
+|------|----------------|
+| `test_component_density_evolution_serial_vs_parallel` | Per-component ρ(r) serial vs MPI parallel agree |
+| `test_mpi_multirank_component_density_matches_serial` | `mpirun -n 2` density evolution matches serial run |
+
+#### `test_galacticsics_integration.py` — end-to-end GalactICS → ntropy
+
+| Test | What it checks |
+|------|----------------|
+| `test_particle_state_from_galacticsics_halo` | `particle_state_from_galacticsics` loads halo IC with tags |
+| `test_galacticsics_halo_density_stable_under_ntropy` | GalactICS NFW halo ρ(r) stable under ntropy evolution |
+| `test_galacticsics_reference_disk_halo_through_ntropy` | Full reference disk+halo IC stable through ntropy |
+
+---
+
+### Running subsets
+
+```bash
+# galacticsics only
+pytest tests/ -v
+
+# ntropy only
+pytest src/ntropy/tests/ -v
+
+# Force backends (incl. C extension if built)
+pytest src/ntropy/tests/test_forces.py src/ntropy/tests/test_bh_c.py -v
+
+# MPI (skip automatically without mpirun)
+pytest src/ntropy/tests/test_parallel.py src/ntropy/tests/test_parallel_density.py -v
+
+# GalactICS IC stability
+pytest src/ntropy/tests/test_galacticsics_integration.py -v
+```
 
 ## Documentation
 
@@ -601,6 +941,8 @@ cd docs && sphinx-build -b html . _build/html
 
 ## Roadmap
 
+### galacticsics
+
 - [x] Phase 1: Package scaffold, I/O, tests
 - [x] Phase 2: Python harmonic evaluator (SciPy Legendre)
 - [x] Phase 3: `solve_potential()` via isolated legacy `dbh`
@@ -609,6 +951,18 @@ cd docs && sphinx-build -b html . _build/html
 - [x] Halo-first two-step workflow (`solve_halo_potential`, `h.dat` merge)
 - [x] Phase 6: Rotation-curve fitting, optimizers, MCMC skeleton
 - [x] Phase 7: galpy bridge, CI, docs scaffold
+
+### ntropy
+
+- [x] JSON-driven runs, Plummer/NFW/Sersic/disk ICs, density stability tests
+- [x] Brute + Python Barnes–Hut forces, variable softening
+- [x] mpi4py Morton domain decomposition; MPI brute partial-target fix
+- [x] Leapfrog (orders 1–2), Euler, RK2/3/4 integrators; energy drift tests
+- [x] galacticsics integration (`sample_galacticsics_*`, notebook walkthrough)
+- [x] **C Barnes–Hut** (`bh_c`): flat pack/bcast MPI path, `PARALLEL.md` roadmap
+- [x] Default 5 Gyr / 1000 steps·Gyr⁻¹ simulation span; time-unit helpers
+- [ ] OpenMP over targets in C walk; distributed tree build at N ≳ 10⁵
+- [ ] BH crossover benchmark at production N on CI hardware
 
 ## Citation
 
