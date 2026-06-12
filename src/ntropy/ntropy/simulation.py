@@ -10,7 +10,9 @@ import numpy as np
 from ntropy.config import RunConfig
 from ntropy.forces.bhtree import BarnesHutTree, compute_forces_bh
 from ntropy.forces.brute import compute_forces_brute
-from ntropy.integrators.leapfrog import leapfrog_step
+from ntropy.integrators.euler import euler_step
+from ntropy.integrators.leapfrog import leapfrog1_step, leapfrog_step
+from ntropy.integrators.rk import rk2_step, rk3_step, rk4_step
 from ntropy.parallel.pool import compute_forces_parallel
 from ntropy.particles import ParticleState
 from ntropy.softening import total_energy
@@ -61,7 +63,42 @@ class Simulation:
         self.config = config
         self.rng = np.random.default_rng(config.seed)
         self.state = state if state is not None else ParticleState.from_config(config)
-        self._tree: BarnesHutTree | None = None
+
+    def _accel_at_pos(self, pos: np.ndarray) -> np.ndarray:
+        """
+        Evaluate gravitational accelerations at an arbitrary position array.
+
+        Parameters
+        ----------
+        pos : ndarray, shape (N, 3)
+            Trial particle positions (masses and softening from ``self.state``).
+
+        Returns
+        -------
+        acc : ndarray, shape (N, 3)
+        """
+        cfg = self.config
+        mass = self.state.mass
+        eps = self.state.eps
+        if cfg.parallel.enabled:
+            return compute_forces_parallel(
+                pos,
+                mass,
+                eps,
+                method=cfg.force.method,
+                theta=cfg.force.theta,
+                n_workers=cfg.parallel.n_workers,
+            )
+        if cfg.force.method == "brute":
+            return compute_forces_brute(pos, mass, eps)
+        tree = BarnesHutTree(pos, mass, eps)
+        return compute_forces_bh(
+            pos,
+            mass,
+            eps,
+            theta=cfg.force.theta,
+            tree=tree,
+        )
 
     def _compute_accelerations(self, state: ParticleState) -> np.ndarray:
         """
@@ -76,31 +113,11 @@ class Simulation:
         -------
         acc : ndarray, shape (N, 3)
         """
-        cfg = self.config
-        use_parallel = cfg.parallel.enabled
-        if use_parallel:
-            return compute_forces_parallel(
-                state.pos,
-                state.mass,
-                state.eps,
-                method=cfg.force.method,
-                theta=cfg.force.theta,
-                n_workers=cfg.parallel.n_workers,
-            )
-        if cfg.force.method == "brute":
-            return compute_forces_brute(state.pos, state.mass, state.eps)
-        self._tree = BarnesHutTree(state.pos, state.mass, state.eps)
-        return compute_forces_bh(
-            state.pos,
-            state.mass,
-            state.eps,
-            theta=cfg.force.theta,
-            tree=self._tree,
-        )
+        return self._accel_at_pos(state.pos)
 
     def step(self, dt: float | None = None) -> None:
         """
-        Advance one leapfrog timestep.
+        Advance one timestep with the configured integrator.
 
         Parameters
         ----------
@@ -108,12 +125,31 @@ class Simulation:
             Timestep override (defaults to ``config.integrator.dt``).
         """
         dt = self.config.integrator.dt if dt is None else dt
-        acc = self._compute_accelerations(self.state)
-        pos_new, vel_half = leapfrog_step(self.state.pos, self.state.vel, acc, dt)
+        integ = self.config.integrator
+        pos, vel = self.state.pos, self.state.vel
+
+        if integ.type == "euler":
+            acc = self._accel_at_pos(pos)
+            pos_new, vel_new = euler_step(pos, vel, acc, dt)
+        elif integ.type == "rk2":
+            pos_new, vel_new = rk2_step(pos, vel, self._accel_at_pos, dt)
+        elif integ.type == "rk3":
+            pos_new, vel_new = rk3_step(pos, vel, self._accel_at_pos, dt)
+        elif integ.type == "rk4":
+            pos_new, vel_new = rk4_step(pos, vel, self._accel_at_pos, dt)
+        elif integ.type == "leapfrog":
+            acc = self._accel_at_pos(pos)
+            if integ.order == 1:
+                pos_new, vel_new = leapfrog1_step(pos, vel, acc, dt)
+            else:
+                pos_new, vel_half = leapfrog_step(pos, vel, acc, dt)
+                acc_new = self._accel_at_pos(pos_new)
+                pos_new, vel_new = pos_new, vel_half + 0.5 * dt * acc_new
+        else:
+            raise ValueError(f"Unknown integrator type {integ.type!r}")
+
         self.state.pos = pos_new
-        self.state.vel = vel_half
-        acc_new = self._compute_accelerations(self.state)
-        self.state.vel = vel_half + 0.5 * dt * acc_new
+        self.state.vel = vel_new
 
     def run(self) -> SimulationResult:
         """

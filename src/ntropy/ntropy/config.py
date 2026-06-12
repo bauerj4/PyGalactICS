@@ -28,9 +28,13 @@ class ForceConfig:
     theta: float = 0.5
 
 
+IntegratorType = Literal["leapfrog", "euler", "rk2", "rk3", "rk4"]
+
+
 @dataclass
 class IntegratorConfig:
-    type: Literal["leapfrog"] = "leapfrog"
+    type: IntegratorType = "leapfrog"
+    order: Literal[1, 2] = 2
     dt: float = 0.01
     n_steps: int = 100
 
@@ -133,8 +137,21 @@ def load_config(path: PathLike) -> RunConfig:
         raise ValueError(f"force.method must be 'brute' or 'bh', got {method!r}")
 
     integ_type = integ_raw.get("type", "leapfrog")
-    if integ_type != "leapfrog":
-        raise ValueError(f"integrator.type must be 'leapfrog', got {integ_type!r}")
+    valid_types = ("leapfrog", "euler", "rk2", "rk3", "rk4")
+    if integ_type not in valid_types:
+        raise ValueError(
+            f"integrator.type must be one of {valid_types}, got {integ_type!r}"
+        )
+
+    integ_order = int(integ_raw.get("order", 2))
+    if integ_type == "leapfrog":
+        if integ_order not in (1, 2):
+            raise ValueError(f"integrator.order must be 1 or 2 for leapfrog, got {integ_order}")
+    elif integ_order != 2:
+        raise ValueError(
+            f"integrator.order is only used for leapfrog; got order={integ_order} "
+            f"with type={integ_type!r}"
+        )
 
     par_mode = par_raw.get("mode", "mpi")
     if par_mode not in ("mpi", "domains"):
@@ -157,7 +174,8 @@ def load_config(path: PathLike) -> RunConfig:
             theta=_validate_positive("force.theta", float(force_raw.get("theta", 0.5))),
         ),
         integrator=IntegratorConfig(
-            type="leapfrog",
+            type=integ_type,  # type: ignore[arg-type]
+            order=integ_order,  # type: ignore[arg-type]
             dt=_validate_positive("integrator.dt", float(integ_raw.get("dt", 0.01))),
             n_steps=int(_validate_positive("integrator.n_steps", float(integ_raw.get("n_steps", 100)), allow_zero=False)),
         ),

@@ -36,6 +36,35 @@ def test_invalid_force_method(tmp_path):
         load_config(cfg_path)
 
 
+def test_load_rk4_integrator(tmp_path):
+    cfg_path = tmp_path / "rk.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "particles": {"file": "parts.dat"},
+                "integrator": {"type": "rk4", "dt": 0.001, "n_steps": 5},
+            }
+        )
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.integrator.type == "rk4"
+    assert cfg.integrator.n_steps == 5
+
+
+def test_invalid_integrator_type(tmp_path):
+    cfg_path = tmp_path / "bad.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "particles": {"file": "p.dat"},
+                "integrator": {"type": "verlet"},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="integrator.type"):
+        load_config(cfg_path)
+
+
 def test_missing_particles_file(tmp_path):
     cfg_path = tmp_path / "bad.json"
     cfg_path.write_text(json.dumps({"seed": 1}))

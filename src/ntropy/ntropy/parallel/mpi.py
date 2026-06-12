@@ -18,8 +18,10 @@ try:
 
     _MPI_COMM = _MPI.COMM_WORLD
     _MPI_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError, OSError):
     _MPI = None
+    _MPI_COMM = None
+    _MPI_AVAILABLE = False
 
 
 def mpi_available() -> bool:

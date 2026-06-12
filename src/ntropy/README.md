@@ -69,7 +69,8 @@ Every run is defined by a JSON file. Required key: `particles.file`.
 | `softening` | `file` | null | One ε per line (when `per_particle=true`) |
 | `force` | `method` | `bh` | `brute` or `bh` |
 | `force` | `theta` | 0.5 | Barnes–Hut opening angle |
-| `integrator` | `type` | `leapfrog` | Only leapfrog supported |
+| `integrator` | `type` | `leapfrog` | `leapfrog` (symplectic), `euler`, `rk2`, `rk3`, `rk4` (explicit, not symplectic) |
+| `integrator` | `order` | `2` | Leapfrog only: `1` = symplectic Euler; `2` = velocity Verlet |
 | `integrator` | `dt` | 0.01 | Timestep |
 | `integrator` | `n_steps` | 100 | Number of steps |
 | `parallel` | `enabled` | false | Enable multiprocessing |
