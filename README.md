@@ -13,6 +13,7 @@ documented subprocess runners and file formats.
 ```
 GalactICSIsoWithGas/
 ├── src/galacticsics/       # Python package (public API)
+├── src/ntropy/             # Minimal N-body IC tester (separate package)
 │   ├── models.py           # GalaxyModel, NFWHalo, ExponentialDisk, …
 │   ├── potential/          # HarmonicPotential, evaluate, solve_potential
 │   ├── distribution/       # Disk DF corrections, epicycle tables
@@ -27,10 +28,33 @@ GalactICSIsoWithGas/
 │   └── python/             # Superseded Python 2 scripts + example data
 ├── models/MilkyWay/        # Reference Milky Way model + makefile workflow
 ├── examples/               # Runnable Python examples
+├── notebooks/              # Tutorial notebooks (outputs → notebooks/artifacts/)
 ├── tests/                  # pytest (Milky Way + spherical fixtures)
 ├── docs/                   # Sphinx documentation
 ├── Makefile                # Top-level developer targets
 └── pyproject.toml
+```
+
+## ntropy (N-body IC tester)
+
+The sibling package **[`src/ntropy/`](src/ntropy/)** provides a minimal self-gravitating
+N-body integrator for short stability checks on initial conditions. It reads the same
+GalactICS ASCII particle format, supports brute-force and Barnes–Hut forces, variable
+softening, JSON-driven runs, and MPI parallel forces (mpi4py). Installed automatically by
+`make install-dev`. See [`src/ntropy/README.md`](src/ntropy/README.md) for full
+documentation.
+
+## Notebooks
+
+Tutorial walkthroughs live in [`notebooks/`](notebooks/). Start with
+[`nfw_halo_walkthrough.ipynb`](notebooks/nfw_halo_walkthrough.ipynb) — **GalactICS
+IC generation** (`dbh` + `genhalo`) fed into **ntropy**; force accuracy and density
+plots. Generated
+figures and particle files go to `notebooks/artifacts/` (gitignored).
+
+```bash
+pip install jupyter
+jupyter notebook notebooks/nfw_halo_walkthrough.ipynb
 ```
 
 ### Isolation principle

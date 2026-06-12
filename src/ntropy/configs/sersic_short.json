@@ -1,0 +1,10 @@
+{
+  "seed": 42,
+  "particles": { "file": "../examples/data/sersic_128.dat" },
+  "softening": { "default": 0.02, "per_particle": false },
+  "force": { "method": "bh", "theta": 0.4 },
+  "integrator": { "type": "leapfrog", "dt": 0.002, "n_steps": 30 },
+  "parallel": { "enabled": true, "n_workers": 2 },
+  "output": { "dir": "run_sersic", "every": 0, "write_final": true },
+  "analysis": { "density_bins": 15, "r_max": 15.0 }
+}

@@ -19,7 +19,7 @@ all: install-dev legacy-build
 
 help:
 	@echo "Targets:"
-	@echo "  install-dev    Create .venv, install package, generate test artifacts"
+	@echo "  install-dev    Create .venv, install galacticsics + ntropy, generate test artifacts"
 	@echo "  generate-artifacts  Run dbh+diskdf+sampling -> tests/generated/reference"
 	@echo "  legacy-build   Build dbh -> legacy/bin/"
 	@echo "  legacy-samplers Build gendisk, genhalo, genbulge, diskdf, getfreqs"
@@ -34,6 +34,7 @@ $(VENV)/bin/activate:
 	$(PYTHON) -m venv $(VENV)
 	$(PIP) install -U pip
 	$(PIP) install -e ".[dev]"
+	$(PIP) install -e "src/ntropy[dev]"
 
 install-dev: $(VENV)/bin/activate generate-artifacts
 
@@ -54,7 +55,7 @@ legacy-clean:
 	$(MAKE) -C legacy/fortran clean
 
 test: install-dev
-	$(PYTEST) tests/ -v --tb=short
+	$(PYTEST) tests/ src/ntropy/tests/ -v --tb=short
 
 example-mw: install-dev
 	$(PY) examples/mw_default.py
@@ -69,5 +70,5 @@ example-halo-first: install-dev legacy-build legacy-samplers
 	$(PY) examples/halo_first_workflow.py
 
 clean: legacy-clean
-	rm -rf $(VENV) build dist *.egg-info src/*.egg-info
+	rm -rf $(VENV) build dist *.egg-info src/*.egg-info src/ntropy/*.egg-info
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

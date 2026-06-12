@@ -32,8 +32,15 @@ src/**/*.egg-info/
 src/**/.mypy_cache/
 src/**/.ruff_cache/
 
+# --- Notebook outputs (regenerated locally) ---
+notebooks/artifacts/
+
 # --- Generated test artifacts (produced by `make generate-artifacts`) ---
 tests/generated/
+
+# --- ntropy simulation outputs ---
+src/ntropy/configs/run_*/
+src/ntropy/examples/data/
 
 # --- Milky Way reference model: inputs only (solver/sampler outputs are local) ---
 models/MilkyWay/**

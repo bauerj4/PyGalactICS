@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ntropy"
+version = "0.1.0"
+description = "Minimal N-body simulation for testing initial conditions"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "GalactICS contributors" }]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+mpi = ["mpi4py>=3.1"]
+galacticsics = []  # sibling package; install from repo root: pip install -e .
+dev = [
+    "pytest>=7.0",
+    "matplotlib>=3.7",
+]
+all = ["ntropy[mpi,galacticsics,dev]"]
+
+[project.scripts]
+ntropy-run = "ntropy.cli:main"
+ntropy-make-ic = "ntropy.cli:make_ic_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
