@@ -13,7 +13,7 @@ PIP    = $(VENV)/bin/pip
 PYTEST = $(VENV)/bin/pytest
 PY     = $(VENV)/bin/python
 
-.PHONY: all install-dev install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test example-mw example-sample example-halo-first clean help
+.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test example-mw example-sample example-halo-first clean help
 
 all: install-dev legacy-build
 
@@ -34,16 +34,23 @@ help:
 install-system-mpi:
 	@bash scripts/ensure_openmpi.sh || true
 
-$(VENV)/bin/activate: install-system-mpi
+$(VENV)/bin/python:
 	$(PYTHON) -m venv $(VENV)
 	$(PIP) install -U pip
+
+install-python-deps: $(VENV)/bin/python install-system-mpi
 	$(PIP) install -e ".[dev]"
 	$(PIP) install -e "src/ntropy[dev]"
-	@$(PIP) install --force-reinstall --no-cache-dir mpi4py
+	@if ldconfig -p 2>/dev/null | grep -q 'libmpi\.so'; then \
+		$(PIP) install --force-reinstall --no-cache-dir mpi4py \
+			|| echo "WARNING: mpi4py reinstall failed. Install OpenMPI dev headers (make install-system-mpi or sudo apt install openmpi-bin libopenmpi-dev) then: pip install --force-reinstall mpi4py"; \
+	else \
+		echo "NOTE: OpenMPI not detected; skipping mpi4py rebuild (MPI tests need make install-system-mpi)"; \
+	fi
 	@$(PY) -c "from mpi4py import MPI; print('mpi4py OK (COMM_WORLD size =', MPI.COMM_WORLD.Get_size(), ')')" \
 		|| echo "WARNING: mpi4py import failed. Install OpenMPI (make install-system-mpi or sudo apt install openmpi-bin libopenmpi-dev) then: pip install --force-reinstall mpi4py"
 
-install-dev: $(VENV)/bin/activate generate-artifacts
+install-dev: install-python-deps generate-artifacts
 
 generate-artifacts: legacy-build legacy-samplers
 	$(PY) -m galacticsics.artifacts.cli generate
