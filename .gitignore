@@ -58,7 +58,7 @@ models/MilkyWay/**
 
 # --- Legacy Fortran/C tree (build with `make legacy-build`; not versioned) ---
 # Note: `src/galacticsics/legacy/` is the Python subprocess bridge and IS tracked.
-legacy/
+/legacy/
 
 # --- Editor / OS ---
 .DS_Store
