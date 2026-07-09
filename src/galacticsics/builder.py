@@ -240,6 +240,7 @@ class GalaxyBuilder:
         work_dir: str | None = None,
         cleanup: bool = True,
         external_halo_path: str | Path | None = None,
+        stream_output: bool = False,
     ) -> dict[str, ParticleSet]:
         """
         Sample N-body particles via legacy ``gendisk`` / ``genhalo`` / ``genbulge``.
@@ -290,6 +291,7 @@ class GalaxyBuilder:
             work_dir=Path(work_dir) if work_dir else None,
             artifact_dir=artifact,
             cleanup=cleanup,
+            stream_output=stream_output,
         )
         self.particles = result.particles
         if external_halo_path is not None:

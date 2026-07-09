@@ -13,7 +13,8 @@ setup(
                 "ntropy/forces/c/bh_module.c",
             ],
             include_dirs=[np.get_include()],
-            extra_compile_args=["-O3", "-std=c11"],
+            extra_compile_args=["-O3", "-std=c11", "-fopenmp"],
+            extra_link_args=["-fopenmp"],
         ),
     ],
 )

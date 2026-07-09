@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
+from ntropy.analysis.tiered_diagnostics import (
+    TieredDiagnosticsLog,
+    write_diagnostics_log,
+    write_particle_bin_dump,
+)
 from ntropy.config import RunConfig, format_run_config
-from ntropy.forces.bhtree import BarnesHutTree, compute_forces_bh
-from ntropy.forces.bhtree_c import compute_forces_bh_c
-from ntropy.forces.brute import compute_forces_brute
+from ntropy.forces.context import ForceContext
 from ntropy.integrators.euler import euler_step
 from ntropy.integrators.leapfrog import leapfrog1_step, leapfrog_step
 from ntropy.integrators.rk import rk2_step, rk3_step, rk4_step
-from ntropy.parallel.pool import compute_forces_parallel
+from ntropy.integrators.tiered import run_tiered_leapfrog
+from ntropy.integrators.timestep import TimestepConfig
+from ntropy.parallel.mpi import mpi_rank0
 from ntropy.particles import ParticleState
 from ntropy.softening import total_energy
 from ntropy.units import code_time_to_gyr, code_time_to_myr
@@ -35,12 +41,15 @@ class SimulationResult:
         Total energy after each step (including initial).
     output_dir : Path or None
         Directory where snapshots were written, if any.
+    diagnostics : TieredDiagnosticsLog or None
+        Per-substep bin and activity history from ntropy tiered runs.
     """
 
     initial_state: ParticleState
     final_state: ParticleState
     energies: list[float] = field(default_factory=list)
     output_dir: Path | None = None
+    diagnostics: TieredDiagnosticsLog | None = None
 
 
 class Simulation:
@@ -65,74 +74,23 @@ class Simulation:
         self.config = config
         self.rng = np.random.default_rng(config.seed)
         self.state = state if state is not None else ParticleState.from_config(config)
-
-    def _accel_at_pos(self, pos: np.ndarray) -> np.ndarray:
-        """
-        Evaluate gravitational accelerations at an arbitrary position array.
-
-        Parameters
-        ----------
-        pos : ndarray, shape (N, 3)
-            Trial particle positions (masses and softening from ``self.state``).
-
-        Returns
-        -------
-        acc : ndarray, shape (N, 3)
-        """
-        cfg = self.config
-        mass = self.state.mass
-        eps = self.state.eps
-        if cfg.parallel.enabled:
-            return compute_forces_parallel(
-                pos,
-                mass,
-                eps,
-                method=cfg.force.method,
-                theta=cfg.force.theta,
-                n_workers=cfg.parallel.n_workers,
-            )
-        if cfg.force.method == "brute":
-            return compute_forces_brute(pos, mass, eps)
-        if cfg.force.method == "bh_c":
-            return compute_forces_bh_c(
-                pos,
-                mass,
-                eps,
-                theta=cfg.force.theta,
-            )
-        tree = BarnesHutTree(pos, mass, eps)
-        return compute_forces_bh(
-            pos,
-            mass,
-            eps,
-            theta=cfg.force.theta,
-            tree=tree,
+        self._force_ctx = ForceContext(
+            config=config.force,
+            parallel_enabled=config.parallel.enabled,
+            n_workers=config.parallel.n_workers,
         )
 
+    def _accel_at_pos(self, pos: np.ndarray) -> np.ndarray:
+        acc = self._force_ctx.accel_at_pos(self.state, pos)
+        self._force_ctx.after_force_eval()
+        return acc
+
     def _compute_accelerations(self, state: ParticleState) -> np.ndarray:
-        """
-        Evaluate gravitational accelerations for the current state.
-
-        Parameters
-        ----------
-        state : ParticleState
-            Current particle state.
-
-        Returns
-        -------
-        acc : ndarray, shape (N, 3)
-        """
+        self.state = state
         return self._accel_at_pos(state.pos)
 
     def step(self, dt: float | None = None) -> None:
-        """
-        Advance one timestep with the configured integrator.
-
-        Parameters
-        ----------
-        dt : float, optional
-            Timestep override (defaults to ``config.integrator.dt``).
-        """
+        """Advance one timestep with the configured integrator."""
         dt = self.config.integrator.dt if dt is None else dt
         integ = self.config.integrator
         pos, vel = self.state.pos, self.state.vel
@@ -160,6 +118,89 @@ class Simulation:
         self.state.pos = pos_new
         self.state.vel = vel_new
 
+    def _run_tiered(
+        self,
+        state: ParticleState,
+        *,
+        output_dir: Path | None = None,
+        show_progress: bool = False,
+        progress_desc: str | None = None,
+    ) -> tuple[ParticleState, list[float], TieredDiagnosticsLog]:
+        """
+        Run ntropy tiered leapfrog on ``state``.
+
+        Returns
+        -------
+        state : ParticleState
+            Evolved state with updated ``timestep_bin``.
+        energies : list of float
+            Energy history.
+        diagnostics : TieredDiagnosticsLog
+            Per-substep bin and activity records.
+        """
+        registry = self.config.particle_types or TypeRegistry.default_galaxy()
+        integ = self.config.integrator
+        out = self.config.output
+        ts_config = integ.timestep
+        if integ.dt_base is not None:
+            ts_config = TimestepConfig(
+                eta=ts_config.eta,
+                dt_base=integ.dt_base,
+                max_bin=ts_config.max_bin,
+                update_every=ts_config.update_every,
+                accel_floor=ts_config.accel_floor,
+            )
+        end_gyr = integ.end_time_gyr if integ.end_time_gyr is not None else 1.0
+        last_acc: np.ndarray | None = None
+        particles_dir = output_dir / "particles" if output_dir else None
+        dump_every = out.particle_dump_every or out.diagnostics_every
+        progress_jsonl = None
+        io_rank0 = mpi_rank0()
+        if output_dir is not None and out.diagnostics_every > 0:
+            progress_jsonl = str(output_dir / "diagnostics.progress.jsonl")
+            if show_progress and io_rank0:
+                (output_dir / "diagnostics.progress.jsonl").write_text("")
+
+        def _maybe_dump(step: int, snap: ParticleState, acc: np.ndarray) -> None:
+            if not io_rank0:
+                return
+            if particles_dir is None or not out.write_particle_bins:
+                return
+            if dump_every <= 0 or step % dump_every != 0:
+                return
+            write_particle_bin_dump(
+                particles_dir / f"step_{step:06d}.npz",
+                snap,
+                acc=acc,
+            )
+
+        def accel_fn(pos: np.ndarray) -> np.ndarray:
+            nonlocal last_acc
+            self.state.pos = pos
+            last_acc = self._accel_at_pos(pos)
+            return last_acc
+
+        state, energies, diag_log = run_tiered_leapfrog(
+            state,
+            registry,
+            accel_fn,
+            ts_config=ts_config,
+            end_time_gyr=end_gyr,
+            order=integ.order,
+            energy_every=max(0, out.every),
+            diagnostics_every=out.diagnostics_every,
+            on_record=_maybe_dump if out.write_particle_bins else None,
+            show_progress=show_progress,
+            progress_desc=progress_desc,
+            progress_style="ntropy",
+            progress_jsonl=progress_jsonl,
+        )
+
+        if output_dir is not None and out.diagnostics_every > 0 and io_rank0:
+            write_diagnostics_log(diag_log, output_dir)
+
+        return state, energies, diag_log
+
     def run(
         self,
         *,
@@ -167,26 +208,10 @@ class Simulation:
         progress_desc: str | None = None,
         print_config: bool = False,
     ) -> SimulationResult:
-        """
-        Run the full simulation loop from the current configuration.
-
-        Parameters
-        ----------
-        show_progress : bool
-            Display a tqdm progress bar over timesteps when ``tqdm`` is installed.
-        progress_desc : str, optional
-            Label shown on the progress bar.
-        print_config : bool
-            Print a human-readable summary of run parameters before integrating.
-
-        Returns
-        -------
-        SimulationResult
-            Initial/final states, energy history, and output path.
-        """
+        """Run the full simulation loop from the current configuration."""
         cfg = self.config
         if print_config or show_progress:
-            print(format_run_config(cfg, label=progress_desc))
+            print(format_run_config(cfg, label=progress_desc), file=sys.stderr, flush=True)
 
         state = self.state.copy()
         state.remove_center_of_mass()
@@ -196,12 +221,36 @@ class Simulation:
         )
 
         output_dir = cfg.resolve_path(cfg.output.dir)
-        if cfg.output.every > 0 or cfg.output.write_final:
+        needs_output_dir = (
+            cfg.output.every > 0
+            or cfg.output.write_final
+            or cfg.output.diagnostics_every > 0
+        )
+        if needs_output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)
 
         initial = state.copy()
-        if cfg.output.every > 0:
+        diag_log: TieredDiagnosticsLog | None = None
+        if cfg.output.every > 0 and mpi_rank0():
             state.write_ascii(output_dir / "snapshot_0000.dat")
+
+        if cfg.integrator.type == "tiered_leapfrog":
+            state, tier_energies, diag_log = self._run_tiered(
+                state,
+                output_dir=output_dir if needs_output_dir else None,
+                show_progress=show_progress,
+                progress_desc=progress_desc,
+            )
+            energies = tier_energies if tier_energies else energies
+            if cfg.output.write_final and mpi_rank0():
+                state.write_ascii(output_dir / "final.dat")
+            return SimulationResult(
+                initial_state=initial,
+                final_state=state,
+                energies=energies,
+                output_dir=output_dir if needs_output_dir else None,
+                diagnostics=diag_log,
+            )
 
         step_iter: range | object = range(1, cfg.integrator.n_steps + 1)
         if show_progress:
@@ -235,16 +284,10 @@ class Simulation:
                     dE=f"{abs(energy - energies[0]) / e0:.2e}",
                     refresh=False,
                 )
-            if show_progress and hasattr(step_iter, "set_description"):
-                pct = 100.0 * step / cfg.integrator.n_steps
-                step_iter.set_description(
-                    f"{progress_desc or 'ntropy simulation'} ({pct:.1f}%)",
-                    refresh=False,
-                )
-            if cfg.output.every > 0 and step % cfg.output.every == 0:
+            if cfg.output.every > 0 and step % cfg.output.every == 0 and mpi_rank0():
                 state.write_ascii(output_dir / f"snapshot_{step:04d}.dat")
 
-        if cfg.output.write_final:
+        if cfg.output.write_final and mpi_rank0():
             state.write_ascii(output_dir / "final.dat")
 
         return SimulationResult(
@@ -256,18 +299,5 @@ class Simulation:
 
 
 def run_simulation(config: RunConfig, state: ParticleState | None = None) -> SimulationResult:
-    """
-    Convenience wrapper to construct and run a :class:`Simulation`.
-
-    Parameters
-    ----------
-    config : RunConfig
-        Run configuration.
-    state : ParticleState, optional
-        Initial state override.
-
-    Returns
-    -------
-    SimulationResult
-    """
+    """Convenience wrapper to construct and run a :class:`Simulation`."""
     return Simulation(config, state=state).run()

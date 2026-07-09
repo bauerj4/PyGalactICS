@@ -22,6 +22,8 @@ dev = [
     "pytest>=7.0",
     "matplotlib>=3.7",
     "tqdm>=4.66",
+    "pandas>=2.0",
+    "jupyter>=1.0",
 ]
 all = ["ntropy[galacticsics,dev,mpi]"]
 

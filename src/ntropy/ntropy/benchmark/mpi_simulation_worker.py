@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ntropy.config import ForceConfig, IntegratorConfig, ParallelConfig, RunConfig
+from ntropy.config import ForceConfig, IntegratorConfig, ParallelConfig, RunConfig, load_config
 from ntropy.particles import ParticleState
 from ntropy.simulation import Simulation
 
@@ -38,16 +38,97 @@ def _load_config(raw: dict) -> RunConfig:
     return cfg
 
 
+def _load_state_npz(path: Path) -> ParticleState:
+    with np.load(path, allow_pickle=True) as data:
+        state = ParticleState.from_arrays(
+            data["pos"],
+            data["vel"],
+            data["mass"],
+            data["eps"],
+            type_id=data["type_id"] if "type_id" in data else None,
+            timestep_bin=data["timestep_bin"] if "timestep_bin" in data else None,
+        )
+        if "tags" in data:
+            state.tags = data["tags"]
+    return state
+
+
+def _run_campaign_dir(work_dir: Path, *, label: str) -> int:
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+
+    try:
+        cfg_path = work_dir / "ntropy_config.json"
+        cfg = load_config(cfg_path)
+        cfg.parallel.enabled = True
+
+        state_path = work_dir / "ic_state.npz"
+        if not state_path.is_file():
+            raise FileNotFoundError(f"missing {state_path}")
+        state = _load_state_npz(state_path)
+
+        result = Simulation(cfg, state=state.copy()).run(
+            show_progress=rank == 0,
+            progress_desc=label,
+            print_config=rank == 0,
+        )
+
+        if rank == 0:
+            e0 = result.energies[0] if result.energies else 0.0
+            ef = result.energies[-1] if result.energies else 0.0
+            dE = abs(ef - e0) / max(abs(e0), 1e-30)
+            out_path = work_dir / "evolve_result.json"
+            payload = {
+                "energies": result.energies,
+                "dE_over_E0": dE,
+                "n_energies": len(result.energies),
+                "n_ranks": comm.Get_size(),
+                "integrator_type": cfg.integrator.type,
+                "force_method": cfg.force.method,
+                "label": label,
+            }
+            out_path.write_text(json.dumps(payload, indent=2))
+        comm.Barrier()
+        return 0
+    except Exception:
+        err_path = work_dir / "evolve_error.log"
+        if rank == 0:
+            tb = traceback.format_exc()
+            err_path.write_text(tb)
+            print(tb, file=sys.stderr)
+        comm.Abort(1)
+        return 1
+
+
 def main(argv: list[str]) -> int:
     """
     Run a simulation under MPI and write energies (rank 0 only).
 
-    Usage: python -m ntropy.benchmark.mpi_simulation_worker \\
-        <state.npz> <config.json> <out.json> [final_state.npz]
+    Usage
+    -----
+    Legacy::
+
+        python -m ntropy.benchmark.mpi_simulation_worker \\
+            <state.npz> <config.json> <out.json> [final_state.npz]
+
+    Campaign (tiered evolve with diagnostics)::
+
+        python -m ntropy.benchmark.mpi_simulation_worker \\
+            --campaign-dir <work_dir> [--label NAME]
     """
+    if len(argv) >= 3 and argv[1] == "--campaign-dir":
+        work_dir = Path(argv[2])
+        label = "campaign evolve"
+        if "--label" in argv:
+            label = argv[argv.index("--label") + 1]
+        return _run_campaign_dir(work_dir, label=label)
+
     if len(argv) not in (4, 5):
         raise SystemExit(
-            f"usage: {argv[0]} <state.npz> <config.json> <out.json> [final_state.npz]"
+            f"usage: {argv[0]} --campaign-dir <work_dir> [--label NAME]\n"
+            f"   or: {argv[0]} <state.npz> <config.json> <out.json> [final_state.npz]"
         )
 
     state_path = Path(argv[1])
@@ -103,8 +184,11 @@ def main(argv: list[str]) -> int:
         comm.Barrier()
         return 0
     except Exception:
+        err_path = work_dir / "evolve_error.log"
         if rank == 0:
-            print(traceback.format_exc(), file=sys.stderr)
+            tb = traceback.format_exc()
+            err_path.write_text(tb)
+            print(tb, file=sys.stderr)
         comm.Abort(1)
         return 1
 

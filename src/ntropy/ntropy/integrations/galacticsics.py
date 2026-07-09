@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
 
 if TYPE_CHECKING:
@@ -117,6 +118,7 @@ def merge_galacticsics_components(
     *,
     eps_by_component: dict[str, float] | None = None,
     default_eps: float = 0.05,
+    type_registry: "TypeRegistry | None" = None,
 ) -> ParticleState:
     """
     Merge multiple galacticsics components into one ntropy state.
@@ -129,17 +131,26 @@ def merge_galacticsics_components(
         Per-component softening lengths.
     default_eps : float
         Fallback softening when a component is not in ``eps_by_component``.
+    type_registry : TypeRegistry, optional
+        Maps component names to integer type ids (default: halo/bulge/disk).
 
     Returns
     -------
     ParticleState
-        Combined state with ``tags`` set; center of mass removed.
+        Combined state with ``tags`` and ``type_id`` set; center of mass removed.
     """
     eps_by_component = eps_by_component or {}
+    registry = type_registry or TypeRegistry.default_galaxy()
     parts: list[ParticleState] = []
+    type_ids: list[np.ndarray] = []
     for name, ps in particles.items():
-        eps = eps_by_component.get(name, default_eps)
-        parts.append(particle_state_from_galacticsics(ps, eps=eps, tag=name))
+        eps = eps_by_component.get(name, registry.eps_for(name) if name in registry.types else default_eps)
+        part = particle_state_from_galacticsics(ps, eps=eps, tag=name)
+        if name in registry.types:
+            tid = registry.id_for(name)
+            part.type_id = np.full(part.n, tid, dtype=np.int32)
+        type_ids.append(part.type_id if part.type_id is not None else np.zeros(part.n, dtype=np.int32))
+        parts.append(part)
     if not parts:
         raise ValueError("No particle components to merge")
 
@@ -148,8 +159,8 @@ def merge_galacticsics_components(
     mass = np.concatenate([p.mass for p in parts])
     eps = np.concatenate([p.eps for p in parts])
     tags = np.concatenate([p.tags for p in parts])
-    state = ParticleState.from_arrays(pos, vel, mass, eps)
-    state.tags = tags
+    merged_type_id = np.concatenate(type_ids)
+    state = ParticleState.from_arrays(pos, vel, mass, eps, type_id=merged_type_id, tags=tags)
     state.remove_center_of_mass()
     return state
 

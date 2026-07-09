@@ -13,6 +13,10 @@
 
 #include "bh_tree.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -515,6 +519,7 @@ int bh_tree_accel_targets(
     if (!tree || !target_indices || !acc_out || n_targets < 0) {
         return -1;
     }
+#pragma omp parallel for if (n_targets > 64) schedule(static)
     for (int k = 0; k < n_targets; ++k) {
         double acc[3];
         bh_tree_accel_one(tree, target_indices[k], theta, pos, eps, acc);

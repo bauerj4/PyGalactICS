@@ -458,6 +458,27 @@ def read_disk_correction(path: PathLike):
     )
 
 
+def cordbh_is_valid(path: PathLike) -> bool:
+    """
+    Return True when ``cordbh.dat`` is non-empty and readable for ``gendisk``.
+
+    Legacy ``diskdf`` can exit 0 after NaN splines, leaving a zero-byte file.
+    ``ensure_disk_df`` uses this instead of a plain ``Path.is_file()`` check.
+    """
+    p = Path(path)
+    if not p.is_file() or p.stat().st_size == 0:
+        return False
+    try:
+        corr = read_disk_correction(p)
+    except (ValueError, OSError, IndexError):
+        return False
+    return (
+        corr.radius.size >= 6
+        and np.all(np.isfinite(corr.f_d))
+        and np.all(np.isfinite(corr.f_sz))
+    )
+
+
 def read_frequency_table(path: PathLike):
     """Read freqdbh.dat epicycle frequency table."""
     from galacticsics.distribution.frequencies import FrequencyTable

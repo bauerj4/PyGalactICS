@@ -9,7 +9,13 @@ from typing import Union
 import numpy as np
 
 from ntropy.config import RunConfig
-from ntropy.io.particles import read_particles_ascii, write_particles_ascii
+from ntropy.particle_types import TypeRegistry
+from ntropy.io.particles import (
+    read_particles_ascii,
+    read_type_ids,
+    write_particles_ascii,
+    write_type_ids,
+)
 from ntropy.io.softening import read_softening_file
 
 PathLike = Union[str, Path]
@@ -30,6 +36,12 @@ class ParticleState:
         Particle masses [GalactICS mass units].
     eps : ndarray, shape (N,)
         Per-particle gravitational softening lengths [kpc].
+    type_id : ndarray of int32, optional
+        Integer particle type ids (see :class:`~ntropy.particle_types.TypeRegistry`).
+    timestep_bin : ndarray of int32, optional
+        GADGET-style integer timestep bin per particle; physical step is
+        ``dt_base * 2**timestep_bin``.  Assigned dynamically by the tiered
+        integrator from local :math:`|a|` and :math:`\\varepsilon`.
     tags : ndarray of str, optional
         Component labels (e.g. ``'halo'``, ``'bulge'``, ``'disk'``).
     """
@@ -38,6 +50,8 @@ class ParticleState:
     vel: np.ndarray
     mass: np.ndarray
     eps: np.ndarray
+    type_id: np.ndarray | None = None
+    timestep_bin: np.ndarray | None = None
     tags: np.ndarray | None = None
 
     @property
@@ -82,7 +96,32 @@ class ParticleState:
                 )
             eps = eps_file
 
-        return cls(pos=pos, vel=vel, mass=mass, eps=eps, tags=None)
+        type_id: np.ndarray | None = None
+        tags: np.ndarray | None = None
+        registry = config.particle_types
+        if "type_id" in data.dtype.names:
+            type_id = data["type_id"].astype(np.int32)
+        elif config.particles.types_file:
+            type_id = read_type_ids(config.resolve_path(config.particles.types_file))
+            if len(type_id) != n:
+                raise ValueError(
+                    f"types file has {len(type_id)} entries but {n} particles"
+                )
+        elif registry is not None and config.particles.default_type:
+            tid = registry.id_for(config.particles.default_type)
+            type_id = np.full(n, tid, dtype=np.int32)
+
+        if registry is not None and type_id is not None:
+            tags = np.empty(n, dtype=object)
+            for label, spec in registry.types.items():
+                mask = type_id == spec.id
+                if not np.any(mask):
+                    continue
+                if not (config.softening.per_particle and config.softening.file):
+                    eps[mask] = spec.eps
+                tags[mask] = label
+
+        return cls(pos=pos, vel=vel, mass=mass, eps=eps, type_id=type_id, tags=tags)
 
     @classmethod
     def from_arrays(
@@ -91,6 +130,10 @@ class ParticleState:
         vel: np.ndarray,
         mass: np.ndarray,
         eps: float | np.ndarray,
+        *,
+        type_id: np.ndarray | None = None,
+        timestep_bin: np.ndarray | None = None,
+        tags: np.ndarray | None = None,
     ) -> ParticleState:
         """
         Construct a particle state from NumPy arrays.
@@ -105,10 +148,17 @@ class ParticleState:
             Masses.
         eps : float or array_like, shape (N,)
             Softening length(s).
+        type_id : array_like, shape (N,), optional
+            Integer type ids.
+        timestep_bin : array_like, shape (N,), optional
+            Integer timestep bins for tiered integration.
+        tags : array_like, optional
+            Component label strings.
 
         Returns
         -------
         ParticleState
+            Constructed particle state.
         """
         n = len(mass)
         if isinstance(eps, (int, float)):
@@ -120,7 +170,13 @@ class ParticleState:
             vel=np.asarray(vel, dtype=float),
             mass=np.asarray(mass, dtype=float),
             eps=eps_arr,
-            tags=None,
+            type_id=None if type_id is None else np.asarray(type_id, dtype=np.int32),
+            timestep_bin=(
+                None
+                if timestep_bin is None
+                else np.asarray(timestep_bin, dtype=np.int32)
+            ),
+            tags=tags,
         )
 
     def remove_center_of_mass(self) -> None:
@@ -142,6 +198,10 @@ class ParticleState:
             vel=self.vel.copy(),
             mass=self.mass.copy(),
             eps=self.eps.copy(),
+            type_id=None if self.type_id is None else self.type_id.copy(),
+            timestep_bin=(
+                None if self.timestep_bin is None else self.timestep_bin.copy()
+            ),
             tags=None if self.tags is None else self.tags.copy(),
         )
 
@@ -154,12 +214,15 @@ class ParticleState:
         ndarray
             Structured array with fields ``mass, x, y, z, vx, vy, vz``.
         """
-        from ntropy.io.particles import PARTICLE_DTYPE
+        from ntropy.io.particles import PARTICLE_DTYPE, PARTICLE_DTYPE_WITH_TYPE
 
-        arr = np.zeros(self.n, dtype=PARTICLE_DTYPE)
+        dtype = PARTICLE_DTYPE_WITH_TYPE if self.type_id is not None else PARTICLE_DTYPE
+        arr = np.zeros(self.n, dtype=dtype)
         arr["mass"] = self.mass
         arr["x"], arr["y"], arr["z"] = self.pos.T
         arr["vx"], arr["vy"], arr["vz"] = self.vel.T
+        if self.type_id is not None:
+            arr["type_id"] = self.type_id
         return arr
 
     def write_ascii(self, path: PathLike) -> None:
@@ -172,6 +235,8 @@ class ParticleState:
             Output file path.
         """
         write_particles_ascii(path, self.to_structured_array())
+        if self.type_id is not None:
+            write_type_ids(Path(path).with_suffix(".types"), self.type_id)
 
     def reorder(self, indices: np.ndarray) -> None:
         """
@@ -186,6 +251,10 @@ class ParticleState:
         self.vel = self.vel[indices]
         self.mass = self.mass[indices]
         self.eps = self.eps[indices]
+        if self.type_id is not None:
+            self.type_id = self.type_id[indices]
+        if self.timestep_bin is not None:
+            self.timestep_bin = self.timestep_bin[indices]
         if self.tags is not None:
             self.tags = self.tags[indices]
 
@@ -211,5 +280,61 @@ class ParticleState:
             vel=self.vel[sel],
             mass=self.mass[sel],
             eps=self.eps[sel],
+            type_id=None if self.type_id is None else self.type_id[sel],
+            timestep_bin=(
+                None if self.timestep_bin is None else self.timestep_bin[sel]
+            ),
             tags=self.tags[sel],
         )
+
+    def mask_type(self, type_id: int) -> ParticleState:
+        """
+        Return particles with a given integer type id.
+
+        Parameters
+        ----------
+        type_id : int
+            Type id to select.
+
+        Returns
+        -------
+        ParticleState
+            Subset with matching ``type_id`` (and aligned ``timestep_bin`` if set).
+        """
+        if self.type_id is None:
+            raise ValueError("ParticleState has no type_id")
+        sel = self.type_id == type_id
+        return ParticleState(
+            pos=self.pos[sel],
+            vel=self.vel[sel],
+            mass=self.mass[sel],
+            eps=self.eps[sel],
+            type_id=self.type_id[sel],
+            timestep_bin=(
+                None if self.timestep_bin is None else self.timestep_bin[sel]
+            ),
+            tags=None if self.tags is None else self.tags[sel],
+        )
+
+    def by_type(self, registry: TypeRegistry):
+        """
+        Iterate over non-empty component subsets.
+
+        Parameters
+        ----------
+        registry : TypeRegistry
+            Type id → label map.
+
+        Yields
+        ------
+        label : str
+            Component name.
+        state : ParticleState
+            Particles of that type.
+        """
+        if self.type_id is None:
+            raise ValueError("ParticleState has no type_id")
+        for label, spec in registry.types.items():
+            subset = self.mask_type(spec.id)
+            if subset.n > 0:
+                yield label, subset

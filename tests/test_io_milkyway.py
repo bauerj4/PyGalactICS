@@ -57,6 +57,16 @@ def test_read_disk_correction(cordbh_path, reference_model):
     assert corr.f_d_at(0.0) == pytest.approx(1.0, rel=1e-2)
 
 
+def test_cordbh_is_valid(reference_artifacts_dir, cordbh_path, tmp_path):
+    from galacticsics.io.formats import cordbh_is_valid
+
+    assert cordbh_is_valid(cordbh_path)
+    empty = tmp_path / "cordbh.dat"
+    empty.write_text("")
+    assert not cordbh_is_valid(empty)
+    assert not cordbh_is_valid(reference_artifacts_dir / "missing.dat")
+
+
 def test_read_frequency_table(freqdbh_path):
     freq = read_frequency_table(freqdbh_path)
     assert freq.radius.shape[0] > 100

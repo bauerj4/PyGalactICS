@@ -76,6 +76,7 @@ class LegacyRunner:
         stdin_path: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        stream_output: bool = False,
     ) -> LegacyRunResult:
         """
         Execute a legacy binary.
@@ -93,6 +94,10 @@ class LegacyRunner:
             Extra environment variables merged onto ``os.environ``.
         timeout : float, optional
             Maximum wall time in seconds.
+        stream_output : bool, optional
+            When ``True``, stream stderr live to the terminal while still
+            capturing stdout.  Particle samplers (``gendisk``, ``genhalo``)
+            write the particle list to stdout — it must always be captured.
 
         Returns
         -------
@@ -112,29 +117,48 @@ class LegacyRunner:
         try:
             if stdin_path is not None:
                 stdin_file = open(stdin_path, "rb")
-            proc = subprocess.run(
-                cmd,
-                cwd=self.cwd,
-                stdin=stdin_file,
-                capture_output=True,
-                env=None if env is None else {**__import__("os").environ, **dict(env)},
-                timeout=timeout,
-                check=False,
-            )
+            if stream_output:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.cwd,
+                    stdin=stdin_file,
+                    stdout=subprocess.PIPE,
+                    stderr=None,
+                    env=None if env is None else {**__import__("os").environ, **dict(env)},
+                    timeout=timeout,
+                    check=False,
+                )
+            else:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.cwd,
+                    stdin=stdin_file,
+                    capture_output=True,
+                    env=None if env is None else {**__import__("os").environ, **dict(env)},
+                    timeout=timeout,
+                    check=False,
+                )
         finally:
             if stdin_file is not None:
                 stdin_file.close()
 
+        stdout = proc.stdout.decode(errors="replace") if proc.stdout else ""
+        stderr = proc.stderr.decode(errors="replace") if proc.stderr else ""
         result = LegacyRunResult(
             command=cmd,
             returncode=proc.returncode,
-            stdout=proc.stdout.decode(errors="replace"),
-            stderr=proc.stderr.decode(errors="replace"),
+            stdout=stdout,
+            stderr=stderr,
             cwd=self.cwd,
         )
         if proc.returncode != 0:
+            detail = result.stderr[:4000] if result.stderr else ""
+            if not detail.strip() and result.stdout:
+                detail = result.stdout[-4000:]
+            if not detail.strip():
+                detail = "(see streamed stderr above)"
             raise LegacyRunError(
                 f"{binary} failed (code {proc.returncode}) in {self.cwd}\n"
-                f"stderr:\n{result.stderr[:2000]}"
+                f"output:\n{detail}"
             )
         return result

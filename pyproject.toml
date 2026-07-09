@@ -17,21 +17,27 @@ dependencies = [
 
 [project.optional-dependencies]
 galpy = ["galpy>=1.8"]
+agama = ["agama>=1.3"]
+gala = ["gala>=1.8"]
+ml = ["torch>=2.0"]
 dev = [
     "pytest>=7.0",
     "matplotlib>=3.7",
+    "pandas>=2.0",
+    "jupyter>=1.0",
 ]
-all = ["galacticsics[galpy,dev]"]
+all = ["galacticsics[galpy,agama,gala,ml,dev]"]
 
 [project.scripts]
 galacticsics-generate-artifacts = "galacticsics.artifacts.cli:main"
+galacticsics-campaign = "galacticsics.campaign.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+testpaths = ["tests", "src/ntropy/tests"]
 markers = [
     "legacy_parity: compare output against legacy Fortran golden files",
     "legacy_binary: requires compiled legacy/bin executables",

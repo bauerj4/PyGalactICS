@@ -35,6 +35,17 @@ def get_comm():
     return _MPI_COMM
 
 
+def mpi_rank0(comm=None) -> bool:
+    """Return True on serial runs or MPI rank 0 (for filesystem I/O)."""
+    if comm is None:
+        if not _MPI_AVAILABLE:
+            return True
+        comm = _MPI_COMM
+    if comm is None:
+        return True
+    return comm.Get_rank() == 0
+
+
 def compute_forces_mpi(
     pos: np.ndarray,
     mass: np.ndarray,

@@ -6,6 +6,9 @@ import numpy as np
 
 from ntropy.units import G
 
+# Above this particle count, skip O(N²) potential energy (use KE-only drift proxy).
+LARGE_N_ENERGY_THRESHOLD = 16_384
+
 
 def pairwise_softening(eps_i: np.ndarray, eps_j: np.ndarray) -> np.ndarray:
     """
@@ -136,12 +139,15 @@ def softened_potential_energy(
     """
     n = len(mass)
     energy = 0.0
-    h_ij = pairwise_softening(eps, eps)
     for i in range(n - 1):
+        mi = mass[i]
+        if mi == 0.0:
+            continue
         dr = pos[i + 1 :] - pos[i]
-        r = np.sqrt(np.sum(dr * dr, axis=1))
-        h = h_ij[i, i + 1 :]
-        energy -= G * mass[i] * np.sum(mass[i + 1 :] / np.sqrt(r * r + h * h))
+        r2 = np.sum(dr * dr, axis=1)
+        h = 0.5 * (eps[i] + eps[i + 1 :])
+        mj = mass[i + 1 :]
+        energy -= G * mi * np.sum(mj / np.sqrt(r2 + h * h))
     return float(energy)
 
 
@@ -168,17 +174,28 @@ def total_energy(
     vel: np.ndarray,
     mass: np.ndarray,
     eps: np.ndarray,
+    *,
+    allow_kinetic_only: bool = True,
 ) -> float:
     """
     Total energy (kinetic + softened potential).
+
+    For ``N > LARGE_N_ENERGY_THRESHOLD`` (default 16384), returns kinetic
+    energy only to avoid O(N²) memory and time.  Tiered diagnostics then
+    report kinetic-energy drift, which is still a useful stability proxy.
 
     Parameters
     ----------
     pos, vel, mass, eps
         Particle state arrays.
+    allow_kinetic_only : bool
+        When ``True`` (default), large ``N`` uses the KE-only fast path.
 
     Returns
     -------
     energy : float
     """
-    return kinetic_energy(vel, mass) + softened_potential_energy(pos, mass, eps)
+    ke = kinetic_energy(vel, mass)
+    if allow_kinetic_only and len(mass) > LARGE_N_ENERGY_THRESHOLD:
+        return ke
+    return ke + softened_potential_energy(pos, mass, eps)

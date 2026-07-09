@@ -30,5 +30,11 @@ Quick start
 API reference
 -------------
 
+.. toctree::
+   :maxdepth: 1
+
+   performance_roadmap
+   full_mw_roadmap
+
 .. automodule:: galacticsics
    :members:

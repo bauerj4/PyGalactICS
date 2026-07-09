@@ -63,6 +63,7 @@ def solve_potential(
     npsi: int = 1000,
     nint: int = 20,
     timeout: float | None = 3600.0,
+    stream_output: bool = False,
 ) -> SolveResult:
     """
     Run the legacy self-consistent Poisson solver (``dbh``).
@@ -133,7 +134,7 @@ def solve_potential(
     write_dbh_input(model, work_dir / "in.dbh")
 
     runner = LegacyRunner(work_dir)
-    runner.run("dbh", stdin_path=work_dir / "in.dbh", timeout=timeout)
+    runner.run("dbh", stdin_path=work_dir / "in.dbh", timeout=timeout, stream_output=stream_output)
 
     dbh_path = work_dir / "dbh.dat"
     if not dbh_path.is_file():

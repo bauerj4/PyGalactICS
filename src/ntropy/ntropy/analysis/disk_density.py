@@ -85,6 +85,37 @@ def bin_midplane_surface_density(
     return SurfaceDensityProfile(r_mid=r_mid, sigma=sigma, counts=counts)
 
 
+def compare_surface_profiles(
+    initial: SurfaceDensityProfile,
+    final: SurfaceDensityProfile,
+    *,
+    min_count: int = 1,
+) -> float:
+    """
+    Maximum relative deviation between two midplane surface-density profiles.
+
+    Parameters
+    ----------
+    initial, final : SurfaceDensityProfile
+        Profiles to compare (must share compatible binning).
+    min_count : int
+        Minimum particle count per ring for inclusion.
+
+    Returns
+    -------
+    max_rel : float
+        Maximum ``|Σ_final - Σ_initial| / Σ_initial`` over valid rings.
+    """
+    max_rel = 0.0
+    for i in range(min(len(initial.sigma), len(final.sigma))):
+        if initial.counts[i] < min_count or final.counts[i] < min_count:
+            continue
+        ref = max(initial.sigma[i], 1e-30)
+        rel = abs(final.sigma[i] - initial.sigma[i]) / ref
+        max_rel = max(max_rel, rel)
+    return max_rel
+
+
 def target_surface_density(
     r: np.ndarray,
     params: ExponentialDiskParams,
@@ -111,6 +142,97 @@ def target_surface_density(
         scale_length=params.scale_length,
         outer_radius=params.outer_radius,
         trunc_width=params.trunc_width,
+    )
+
+
+@dataclass
+class DensityMap2D:
+    """
+    Mass surface density on a projected plane.
+
+    Attributes
+    ----------
+    x_edges, y_edges : ndarray
+        Bin edges along the two projected axes [kpc].
+    density : ndarray, shape (nx, ny)
+        Mass per unit area in each bin.
+    counts : ndarray, shape (nx, ny)
+        Particle count per bin.
+    """
+
+    x_edges: np.ndarray
+    y_edges: np.ndarray
+    density: np.ndarray
+    counts: np.ndarray
+
+
+def bin_plane_density(
+    pos: np.ndarray,
+    mass: np.ndarray,
+    *,
+    axes: tuple[int, int] = (0, 1),
+    n_bins: int = 80,
+    half_extent: float = 25.0,
+    z_filter: np.ndarray | None = None,
+) -> DensityMap2D:
+    """
+    Bin particle mass into a 2D projected surface-density map.
+
+    Parameters
+    ----------
+    pos : ndarray, shape (N, 3)
+        Particle positions [kpc].
+    mass : ndarray, shape (N,)
+        Particle masses.
+    axes : tuple of int
+        Position column indices for the horizontal and vertical image axes.
+        ``(0, 1)`` is face-on (x–y); ``(0, 2)`` is edge-on (x–z).
+    n_bins : int
+        Number of bins along each axis.
+    half_extent : float
+        Half-width of the square field of view [kpc].
+    z_filter : ndarray of bool, optional
+        When set, include only particles where ``z_filter`` is True.
+
+    Returns
+    -------
+    DensityMap2D
+        Binned surface-density map.
+    """
+    ax0, ax1 = axes
+    mask = np.ones(len(pos), dtype=bool) if z_filter is None else z_filter
+    coords = pos[mask]
+    weights = mass[mask]
+    if coords.size == 0:
+        edges = np.linspace(-half_extent, half_extent, n_bins + 1)
+        empty = np.zeros((n_bins, n_bins), dtype=float)
+        return DensityMap2D(
+            x_edges=edges,
+            y_edges=edges,
+            density=empty,
+            counts=empty.astype(int),
+        )
+
+    x_edges = np.linspace(-half_extent, half_extent, n_bins + 1)
+    y_edges = x_edges
+    counts, _, _ = np.histogram2d(
+        coords[:, ax0],
+        coords[:, ax1],
+        bins=[x_edges, y_edges],
+    )
+    mass_hist, _, _ = np.histogram2d(
+        coords[:, ax0],
+        coords[:, ax1],
+        bins=[x_edges, y_edges],
+        weights=weights,
+    )
+    bin_area = ((x_edges[1] - x_edges[0]) ** 2)
+    density = mass_hist / max(bin_area, 1e-30)
+    return DensityMap2D(
+        x_edges=x_edges,
+        y_edges=y_edges,
+        density=density,
+        counts=counts.astype(int),
     )
 
 
