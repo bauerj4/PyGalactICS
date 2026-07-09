@@ -114,9 +114,9 @@ Set per-particle values via a sidecar file and `"softening": {"per_particle": tr
 
 ## MPI parallel forces (Gadget-2 style)
 
-Parallel force evaluation uses **mpi4py** (installed by default with ntropy).
-`make install-dev` also installs system OpenMPI (`openmpi-bin`, `libopenmpi-dev`)
-when missing. Rebuild mpi4py after installing OpenMPI if import fails:
+Parallel force evaluation uses **mpi4py** (optional; `make install-dev` installs it when
+OpenMPI is available via `scripts/ensure_openmpi.sh`). Rebuild mpi4py after installing
+OpenMPI if import fails:
 
 ```bash
 pip install --force-reinstall mpi4py

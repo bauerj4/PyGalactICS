@@ -19,7 +19,7 @@ all: install-dev legacy-build
 
 help:
 	@echo "Targets:"
-	@echo "  install-dev    Create .venv, install galacticsics + ntropy (+ mpi4py/OpenMPI), generate test artifacts"
+	@echo "  install-dev    Create .venv, install galacticsics + ntropy (mpi4py when OpenMPI available), generate test artifacts"
 	@echo "  install-system-mpi  Install OpenMPI system packages for mpi4py (Debian/dnf/Homebrew)"
 	@echo "  generate-artifacts  Run dbh+diskdf+sampling -> tests/generated/reference"
 	@echo "  legacy-build   Build dbh -> legacy/bin/"
