@@ -15,6 +15,8 @@ pip-wheel-metadata/
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+*.pyd
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -32,8 +34,16 @@ src/**/*.egg-info/
 src/**/.mypy_cache/
 src/**/.ruff_cache/
 
+# --- Notebook outputs (regenerated locally) ---
+.ipynb_checkpoints/
+notebooks/artifacts/
+
 # --- Generated test artifacts (produced by `make generate-artifacts`) ---
 tests/generated/
+
+# --- ntropy simulation outputs ---
+src/ntropy/configs/run_*/
+src/ntropy/examples/data/
 
 # --- Milky Way reference model: inputs only (solver/sampler outputs are local) ---
 models/MilkyWay/**
@@ -51,7 +61,7 @@ models/MilkyWay/**
 
 # --- Legacy Fortran/C tree (build with `make legacy-build`; not versioned) ---
 # Note: `src/galacticsics/legacy/` is the Python subprocess bridge and IS tracked.
-legacy/
+/legacy/
 
 # --- Editor / OS ---
 .DS_Store

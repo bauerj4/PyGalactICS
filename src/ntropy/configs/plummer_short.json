@@ -1,0 +1,10 @@
+{
+  "seed": 42,
+  "particles": { "file": "../examples/data/plummer_128.dat" },
+  "softening": { "default": 0.02, "per_particle": false },
+  "force": { "method": "bh", "theta": 0.5 },
+  "integrator": { "type": "leapfrog", "dt": 0.005, "n_steps": 50 },
+  "parallel": { "enabled": true, "n_workers": 2, "mode": "mpi" },
+  "output": { "dir": "run_plummer", "every": 25, "write_final": true },
+  "analysis": { "density_bins": 20, "r_max": 5.0 }
+}

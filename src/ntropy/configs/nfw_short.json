@@ -1,0 +1,10 @@
+{
+  "seed": 42,
+  "particles": { "file": "../examples/data/nfw_256.dat" },
+  "softening": { "default": 0.05, "per_particle": false },
+  "force": { "method": "brute", "theta": 0.5 },
+  "integrator": { "type": "leapfrog", "dt": 0.002, "n_steps": 30 },
+  "parallel": { "enabled": false, "n_workers": 1 },
+  "output": { "dir": "run_nfw", "every": 0, "write_final": true },
+  "analysis": { "density_bins": 20, "r_max": 80.0 }
+}
