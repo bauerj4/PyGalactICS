@@ -68,12 +68,44 @@ def test_run_tiered_writes_diagnostics_and_callback(tmp_path: Path):
         ts_config=ts,
         end_time_gyr=0.002,
         diagnostics_every=1,
+        particle_dump_every=1,
         on_record=on_record,
     )
     write_diagnostics_log(diag, tmp_path)
     assert (tmp_path / "diagnostics.csv").exists()
     assert (tmp_path / "diagnostics.jsonl").exists()
     loaded = load_diagnostics_log(tmp_path)
-    assert len(loaded.steps) == len(diag.steps)
+    assert len(loaded.steps) == diag.n_recorded
     assert len(dumps) >= 2
     assert (tmp_path / "step_000000.npz").exists()
+
+
+def test_run_tiered_streams_diagnostics_without_ram_growth(tmp_path: Path):
+    state = sample_plummer(seed=5)
+    registry = TypeRegistry.from_specs(
+        [ParticleTypeSpec(id=1, label="all", eps=0.05, min_timestep_bin=0, max_timestep_bin=3)]
+    )
+    state.type_id = np.ones(state.n, dtype=np.int32)
+    jsonl_path = tmp_path / "diagnostics.jsonl"
+    jsonl_path.write_text("")
+
+    def accel(pos: np.ndarray) -> np.ndarray:
+        from ntropy.forces.brute import compute_forces_brute
+        return compute_forces_brute(pos, state.mass, state.eps)
+
+    ts = TimestepConfig(eta=0.05, dt_base=0.05, max_bin=3, update_every=1)
+    _, _, diag = run_tiered_leapfrog(
+        state,
+        registry,
+        accel,
+        ts_config=ts,
+        end_time_gyr=0.002,
+        diagnostics_every=1,
+        diagnostics_jsonl=jsonl_path,
+    )
+    assert diag.n_recorded > 0
+    assert len(diag.steps) == 0
+    assert jsonl_path.stat().st_size > 0
+    write_diagnostics_log(diag, tmp_path)
+    loaded = load_diagnostics_log(tmp_path)
+    assert len(loaded.steps) == diag.n_recorded

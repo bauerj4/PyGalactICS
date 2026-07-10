@@ -1,16 +1,5 @@
 /*
  * bh_module.c — Python C-API bindings for the Barnes–Hut tree.
- *
- * Exposes module ntropy.forces._bh_c:
- *   build_tree(pos, mass, eps)       -> Tree
- *   tree_from_packed(nodes, ...)     -> Tree
- *   Tree.accel_targets(indices, theta, pos=None, eps=None)
- *   Tree.accel_all(theta, pos=None, eps=None)
- *   Tree.pack_buffers()              -> dict for MPI bcast
- *   NODE_PACK_WIDTH = 19
- *
- * Python users should import ntropy.forces.bhtree_c instead; this file is the
- * low-level bridge documented in bhtree_c.py and forces/c/PARALLEL.md.
  */
 
 #define PY_SSIZE_T_CLEAN
@@ -20,6 +9,7 @@
 
 #include <Python.h>
 #include <numpy/arrayobject.h>
+#include <string.h>
 
 #define BH_NODE_PACK_WIDTH 19
 
@@ -51,6 +41,79 @@ static int bh_check_array(PyArrayObject *arr, int ndim, int typenum) {
         return -1;
     }
     return 0;
+}
+
+static int bh_read_opt_flag(PyObject *opts, const char *key, int *out) {
+    PyObject *val = PyDict_GetItemString(opts, key);
+    if (!val) {
+        return 0;
+    }
+    *out = PyObject_IsTrue(val) ? 1 : 0;
+    return 0;
+}
+
+static int bh_read_opt_schedule(PyObject *opts, int *out) {
+    PyObject *val = PyDict_GetItemString(opts, "omp_schedule");
+    if (!val) {
+        return 0;
+    }
+    if (PyLong_Check(val)) {
+        *out = (int)PyLong_AsLong(val);
+        return 0;
+    }
+    if (PyUnicode_Check(val)) {
+        if (PyUnicode_CompareWithASCIIString(val, "guided") == 0) {
+            *out = 1;
+            return 0;
+        }
+        if (PyUnicode_CompareWithASCIIString(val, "dynamic") == 0) {
+            *out = 2;
+            return 0;
+        }
+        *out = 0;
+        return 0;
+    }
+    PyErr_SetString(PyExc_TypeError, "omp_schedule must be int or str");
+    return -1;
+}
+
+static int bh_parse_opts(PyObject *opts_obj, BHTreeOpts *out) {
+    bh_tree_opts_default(out);
+    if (!opts_obj || opts_obj == Py_None) {
+        return 0;
+    }
+    if (!PyDict_Check(opts_obj)) {
+        PyErr_SetString(PyExc_TypeError, "opts must be a dict or None");
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "fast_inv_r3", &out->fast_inv_r3) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "squared_opening", &out->squared_opening) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "iterative_walk", &out->iterative_walk) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "morton_build", &out->morton_build) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "borrow_arrays", &out->borrow_arrays) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "fast_coincident_check", &out->fast_coincident_check) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "native_pack", &out->native_pack) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "accel_all_fast", &out->accel_all_fast) != 0) {
+        return -1;
+    }
+    if (bh_read_opt_flag(opts_obj, "simd_leaves", &out->simd_leaves) != 0) {
+        return -1;
+    }
+    return bh_read_opt_schedule(opts_obj, &out->omp_schedule);
 }
 
 static int bh_bind_particle_arrays(
@@ -149,11 +212,31 @@ static PyObject *PyBHTree_new(PyTypeObject *cls, PyObject *args, PyObject *kwds)
 }
 
 static PyObject *PyBHTree_build(PyTypeObject *cls, PyObject *args, PyObject *kwds) {
-    static char *kwlist[] = {"pos", "mass", "eps", NULL};
+    static char *kwlist[] = {"pos", "mass", "eps", "opts", NULL};
     PyArrayObject *pos = NULL;
     PyArrayObject *mass = NULL;
     PyArrayObject *eps = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O!O!", kwlist, &PyArray_Type, &pos, &PyArray_Type, &mass, &PyArray_Type, &eps)) {
+    PyObject *opts_obj = Py_None;
+    if (
+        !PyArg_ParseTupleAndKeywords(
+            args,
+            kwds,
+            "O!O!O!|O",
+            kwlist,
+            &PyArray_Type,
+            &pos,
+            &PyArray_Type,
+            &mass,
+            &PyArray_Type,
+            &eps,
+            &opts_obj
+        )
+    ) {
+        return NULL;
+    }
+
+    BHTreeOpts opts;
+    if (bh_parse_opts(opts_obj, &opts) != 0) {
         return NULL;
     }
 
@@ -171,7 +254,8 @@ static PyObject *PyBHTree_build(PyTypeObject *cls, PyObject *args, PyObject *kwd
             (const double *)PyArray_DATA(pos),
             (const double *)PyArray_DATA(mass),
             (const double *)PyArray_DATA(eps),
-            self->tree.n_particles
+            self->tree.n_particles,
+            &opts
         ) != 0
     ) {
         PyErr_SetString(PyExc_MemoryError, "failed to build Barnes-Hut tree");
@@ -182,17 +266,31 @@ static PyObject *PyBHTree_build(PyTypeObject *cls, PyObject *args, PyObject *kwd
 }
 
 static PyObject *PyBHTree_from_packed(PyTypeObject *cls, PyObject *args, PyObject *kwds) {
-    static char *kwlist[] = {"nodes", "leaf_indices", "pos", "mass", "eps", NULL};
+    static char *kwlist[] = {
+        "nodes",
+        "leaf_indices",
+        "pos",
+        "mass",
+        "eps",
+        "pack_format",
+        "nodes_native",
+        "opts",
+        NULL,
+    };
     PyArrayObject *nodes = NULL;
     PyArrayObject *leaf_indices = NULL;
     PyArrayObject *pos = NULL;
     PyArrayObject *mass = NULL;
     PyArrayObject *eps = NULL;
+    long pack_format = NTROPY_BH_PACK_LEGACY;
+    PyObject *nodes_native_obj = Py_None;
+    PyObject *opts_obj = Py_None;
+
     if (
         !PyArg_ParseTupleAndKeywords(
             args,
             kwds,
-            "O!O!O!O!O!",
+            "O!O!O!O!O!|lOO",
             kwlist,
             &PyArray_Type,
             &nodes,
@@ -203,11 +301,83 @@ static PyObject *PyBHTree_from_packed(PyTypeObject *cls, PyObject *args, PyObjec
             &PyArray_Type,
             &mass,
             &PyArray_Type,
-            &eps
+            &eps,
+            &pack_format,
+            &nodes_native_obj,
+            &opts_obj
         )
     ) {
         return NULL;
     }
+
+    BHTreeOpts opts;
+    if (bh_parse_opts(opts_obj, &opts) != 0) {
+        return NULL;
+    }
+
+    const int n_nodes = pack_format == NTROPY_BH_PACK_NATIVE
+        ? 0
+        : (int)PyArray_DIM(nodes, 0);
+    BHNode *node_buf = NULL;
+
+    if (pack_format == NTROPY_BH_PACK_NATIVE) {
+        if (nodes_native_obj == Py_None) {
+            PyErr_SetString(PyExc_ValueError, "nodes_native required for native pack format");
+            return NULL;
+        }
+        PyArrayObject *native = (PyArrayObject *)nodes_native_obj;
+        if (PyArray_TYPE(native) != NPY_UINT8 || !PyArray_ISCONTIGUOUS(native)) {
+            PyErr_SetString(PyExc_ValueError, "nodes_native must be contiguous uint8");
+            return NULL;
+        }
+        const npy_intp nbytes = PyArray_DIM(native, 0);
+        if (nbytes % (npy_intp)sizeof(BHNode) != 0) {
+            PyErr_SetString(PyExc_ValueError, "nodes_native length must be multiple of BHNode size");
+            return NULL;
+        }
+        const int native_nodes = (int)(nbytes / (npy_intp)sizeof(BHNode));
+        node_buf = (BHNode *)malloc((size_t)native_nodes * sizeof(BHNode));
+        if (!node_buf) {
+            return PyErr_NoMemory();
+        }
+        memcpy(node_buf, PyArray_DATA(native), (size_t)native_nodes * sizeof(BHNode));
+        if (bh_check_array(leaf_indices, 1, NPY_INT32) != 0) {
+            free(node_buf);
+            return NULL;
+        }
+        PyBHTreeObject *self = (PyBHTreeObject *)PyBHTree_new(cls, NULL, NULL);
+        if (!self) {
+            free(node_buf);
+            return NULL;
+        }
+        if (bh_bind_particle_arrays(self, pos, mass, eps) != 0) {
+            free(node_buf);
+            Py_DECREF(self);
+            return NULL;
+        }
+        const int n_leaf = (int)PyArray_DIM(leaf_indices, 0);
+        if (
+            bh_tree_from_packed(
+                &self->tree,
+                node_buf,
+                native_nodes,
+                (const int *)PyArray_DATA(leaf_indices),
+                n_leaf,
+                (const double *)PyArray_DATA(pos),
+                (const double *)PyArray_DATA(mass),
+                (const double *)PyArray_DATA(eps),
+                self->tree.n_particles,
+                &opts
+            ) != 0
+        ) {
+            free(node_buf);
+            Py_DECREF(self);
+            return PyErr_NoMemory();
+        }
+        free(node_buf);
+        return (PyObject *)self;
+    }
+
     if (bh_check_array(nodes, 2, NPY_FLOAT64) != 0) {
         return NULL;
     }
@@ -219,8 +389,7 @@ static PyObject *PyBHTree_from_packed(PyTypeObject *cls, PyObject *args, PyObjec
         return NULL;
     }
 
-    const int n_nodes = (int)PyArray_DIM(nodes, 0);
-    BHNode *node_buf = (BHNode *)malloc((size_t)n_nodes * sizeof(BHNode));
+    node_buf = (BHNode *)malloc((size_t)n_nodes * sizeof(BHNode));
     if (!node_buf) {
         return PyErr_NoMemory();
     }
@@ -249,7 +418,8 @@ static PyObject *PyBHTree_from_packed(PyTypeObject *cls, PyObject *args, PyObjec
             (const double *)PyArray_DATA(pos),
             (const double *)PyArray_DATA(mass),
             (const double *)PyArray_DATA(eps),
-            self->tree.n_particles
+            self->tree.n_particles,
+            &opts
         ) != 0
     ) {
         free(node_buf);
@@ -302,24 +472,31 @@ static PyObject *PyBHTree_accel_targets(PyBHTreeObject *self, PyObject *args, Py
         return NULL;
     }
 
-    int *target_buf = (int *)malloc((size_t)n_targets * sizeof(int));
-    if (!target_buf) {
-        Py_DECREF(out);
-        return PyErr_NoMemory();
-    }
-    if (PyArray_TYPE(targets) == NPY_INT64) {
-        const npy_int64 *src = (const npy_int64 *)PyArray_DATA(targets);
-        for (npy_intp i = 0; i < n_targets; ++i) {
-            target_buf[i] = (int)src[i];
-        }
+    const int *target_ptr = NULL;
+    int *target_buf = NULL;
+    if (PyArray_TYPE(targets) == NPY_INT32 && PyArray_ISCONTIGUOUS(targets)) {
+        target_ptr = (const int *)PyArray_DATA(targets);
     } else {
-        memcpy(target_buf, PyArray_DATA(targets), (size_t)n_targets * sizeof(int));
+        target_buf = (int *)malloc((size_t)n_targets * sizeof(int));
+        if (!target_buf) {
+            Py_DECREF(out);
+            return PyErr_NoMemory();
+        }
+        if (PyArray_TYPE(targets) == NPY_INT64) {
+            const npy_int64 *src = (const npy_int64 *)PyArray_DATA(targets);
+            for (npy_intp i = 0; i < n_targets; ++i) {
+                target_buf[i] = (int)src[i];
+            }
+        } else {
+            memcpy(target_buf, PyArray_DATA(targets), (size_t)n_targets * sizeof(int));
+        }
+        target_ptr = target_buf;
     }
 
     if (
         bh_tree_accel_targets(
             &self->tree,
-            target_buf,
+            target_ptr,
             (int)n_targets,
             theta,
             pos,
@@ -344,55 +521,134 @@ static PyObject *PyBHTree_accel_all(PyBHTreeObject *self, PyObject *args, PyObje
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "d|OO", kwlist, &theta, &pos_obj, &eps_obj)) {
         return NULL;
     }
-    npy_intp dims[1] = {self->tree.n_particles};
-    PyArrayObject *targets = (PyArrayObject *)PyArray_SimpleNew(1, dims, NPY_INT32);
-    if (!targets) {
+
+    const double *pos = self->tree.pos;
+    const double *eps = self->tree.eps;
+    if (pos_obj != Py_None) {
+        PyArrayObject *pos_arr = (PyArrayObject *)pos_obj;
+        if (bh_check_array(pos_arr, 2, NPY_FLOAT64) != 0) {
+            return NULL;
+        }
+        pos = (double *)PyArray_DATA(pos_arr);
+    }
+    if (eps_obj != Py_None) {
+        PyArrayObject *eps_arr = (PyArrayObject *)eps_obj;
+        if (bh_check_array(eps_arr, 1, NPY_FLOAT64) != 0) {
+            return NULL;
+        }
+        eps = (double *)PyArray_DATA(eps_arr);
+    }
+
+    const int n = self->tree.n_particles;
+    npy_intp dims[2] = {n, 3};
+    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(2, dims, NPY_FLOAT64);
+    if (!out) {
         return NULL;
     }
-    int *tdata = (int *)PyArray_DATA(targets);
-    for (int i = 0; i < self->tree.n_particles; ++i) {
-        tdata[i] = i;
+
+    int status = 0;
+    if (self->tree.opts.accel_all_fast) {
+        status = bh_tree_accel_all(&self->tree, theta, pos, eps, (double *)PyArray_DATA(out));
+    } else {
+        npy_intp tdims[1] = {n};
+        PyArrayObject *targets = (PyArrayObject *)PyArray_SimpleNew(1, tdims, NPY_INT32);
+        if (!targets) {
+            Py_DECREF(out);
+            return NULL;
+        }
+        int *tdata = (int *)PyArray_DATA(targets);
+        for (int i = 0; i < n; ++i) {
+            tdata[i] = i;
+        }
+        status = bh_tree_accel_targets(
+            &self->tree,
+            tdata,
+            n,
+            theta,
+            pos,
+            eps,
+            (double *)PyArray_DATA(out)
+        );
+        Py_DECREF(targets);
     }
-    PyObject *call_args = Py_BuildValue("(OdOO)", targets, theta, pos_obj, eps_obj);
-    Py_DECREF(targets);
-    if (!call_args) {
+
+    if (status != 0) {
+        Py_DECREF(out);
+        PyErr_SetString(PyExc_RuntimeError, "acceleration evaluation failed");
         return NULL;
     }
-    PyObject *result = PyBHTree_accel_targets(self, call_args, NULL);
-    Py_DECREF(call_args);
-    return result;
+    return (PyObject *)out;
 }
 
 static PyObject *PyBHTree_pack_buffers(PyBHTreeObject *self, PyObject *Py_UNUSED(ignored)) {
     const int n_nodes = self->tree.n_nodes;
     const int n_leaf = self->tree.n_leaf_indices;
+    const int pack_format = self->tree.opts.native_pack ? NTROPY_BH_PACK_NATIVE : NTROPY_BH_PACK_LEGACY;
 
-    npy_intp node_dims[2] = {n_nodes, BH_NODE_PACK_WIDTH};
     npy_intp leaf_dims[1] = {n_leaf};
-    PyArrayObject *nodes_arr = (PyArrayObject *)PyArray_SimpleNew(2, node_dims, NPY_FLOAT64);
     PyArrayObject *leaf_arr = (PyArrayObject *)PyArray_SimpleNew(1, leaf_dims, NPY_INT32);
-    npy_intp meta_dims[1] = {2};
+    npy_intp meta_dims[1] = {3};
     PyArrayObject *meta_arr = (PyArrayObject *)PyArray_SimpleNew(1, meta_dims, NPY_INT64);
-    if (!nodes_arr || !leaf_arr || !meta_arr) {
-        Py_XDECREF(nodes_arr);
+    PyArrayObject *nodes_arr = NULL;
+    PyArrayObject *native_arr = NULL;
+
+    if (!leaf_arr || !meta_arr) {
         Py_XDECREF(leaf_arr);
         Py_XDECREF(meta_arr);
         return PyErr_NoMemory();
     }
 
-    double *rows = (double *)PyArray_DATA(nodes_arr);
-    for (int i = 0; i < n_nodes; ++i) {
-        bh_fill_node_row(&self->tree.nodes[i], rows + i * BH_NODE_PACK_WIDTH);
-    }
     memcpy(PyArray_DATA(leaf_arr), self->tree.leaf_indices, (size_t)n_leaf * sizeof(int));
     npy_int64 *meta = (npy_int64 *)PyArray_DATA(meta_arr);
     meta[0] = n_nodes;
     meta[1] = n_leaf;
+    meta[2] = pack_format;
+
+    if (pack_format == NTROPY_BH_PACK_NATIVE) {
+        npy_intp native_dims[1] = {(npy_intp)n_nodes * (npy_intp)sizeof(BHNode)};
+        native_arr = (PyArrayObject *)PyArray_SimpleNew(1, native_dims, NPY_UINT8);
+        if (!native_arr) {
+            Py_DECREF(leaf_arr);
+            Py_DECREF(meta_arr);
+            return PyErr_NoMemory();
+        }
+        memcpy(PyArray_DATA(native_arr), self->tree.nodes, (size_t)native_dims[0]);
+        npy_intp legacy_dims[2] = {0, BH_NODE_PACK_WIDTH};
+        nodes_arr = (PyArrayObject *)PyArray_SimpleNew(2, legacy_dims, NPY_FLOAT64);
+        if (!nodes_arr) {
+            Py_DECREF(leaf_arr);
+            Py_DECREF(meta_arr);
+            Py_DECREF(native_arr);
+            return PyErr_NoMemory();
+        }
+    } else {
+        npy_intp node_dims[2] = {n_nodes, BH_NODE_PACK_WIDTH};
+        nodes_arr = (PyArrayObject *)PyArray_SimpleNew(2, node_dims, NPY_FLOAT64);
+        if (!nodes_arr) {
+            Py_DECREF(leaf_arr);
+            Py_DECREF(meta_arr);
+            return PyErr_NoMemory();
+        }
+        double *rows = (double *)PyArray_DATA(nodes_arr);
+        for (int i = 0; i < n_nodes; ++i) {
+            bh_fill_node_row(&self->tree.nodes[i], rows + i * BH_NODE_PACK_WIDTH);
+        }
+        npy_intp native_dims[1] = {0};
+        native_arr = (PyArrayObject *)PyArray_SimpleNew(1, native_dims, NPY_UINT8);
+        if (!native_arr) {
+            Py_DECREF(leaf_arr);
+            Py_DECREF(meta_arr);
+            Py_DECREF(nodes_arr);
+            return PyErr_NoMemory();
+        }
+    }
 
     return Py_BuildValue(
-        "{s:O,s:O,s:O,s:O,s:O,s:O}",
+        "{s:O,s:O,s:O,s:O,s:O,s:O,s:O,s:i}",
         "nodes",
         nodes_arr,
+        "nodes_native",
+        native_arr,
         "leaf_indices",
         leaf_arr,
         "meta",
@@ -402,7 +658,9 @@ static PyObject *PyBHTree_pack_buffers(PyBHTreeObject *self, PyObject *Py_UNUSED
         "mass",
         self->mass_ref,
         "eps",
-        self->eps_ref
+        self->eps_ref,
+        "pack_format",
+        pack_format
     );
 }
 
@@ -481,6 +739,16 @@ PyMODINIT_FUNC PyInit__bh_c(void) {
         return NULL;
     }
     if (PyModule_AddIntConstant(module, "NODE_PACK_WIDTH", BH_NODE_PACK_WIDTH) < 0) {
+        Py_DECREF(&PyBHTreeType);
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(module, "PACK_FORMAT_LEGACY", NTROPY_BH_PACK_LEGACY) < 0) {
+        Py_DECREF(&PyBHTreeType);
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(module, "PACK_FORMAT_NATIVE", NTROPY_BH_PACK_NATIVE) < 0) {
         Py_DECREF(&PyBHTreeType);
         Py_DECREF(module);
         return NULL;

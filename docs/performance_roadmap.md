@@ -42,7 +42,7 @@ Parallelize the outer target loop in `bh_tree_accel_targets` (`bh_tree.c`).
 
 ## P3 — Active-subset forces + tiered dt (implemented)
 
-- Per-particle **dynamic** timestep bins from :math:`\\eta\\sqrt{\\varepsilon/|a|}`
+- Per-particle **dynamic** timestep bins from $\eta\sqrt{\varepsilon/|a|}$
   (GADGET-2), quantized to power-of-two multiples of ``dt_base``.
 - Type-specific ``min_timestep_bin`` / ``max_timestep_bin`` bound the hierarchy;
   bins are not fixed by component type.

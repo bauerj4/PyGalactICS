@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from itertools import product
 from pathlib import Path
 from typing import Any
 
 from galacticsics.models import GalaxyModel
+
+# GalaxyModel sub-objects editable via dot-path patch / grid axes.
+PATCHABLE_COMPONENTS = (
+    "halo",
+    "disk",
+    "disk2",
+    "gas",
+    "bulge",
+    "black_hole",
+    "disk_kinematics",
+)
 
 
 @dataclass
@@ -24,7 +35,9 @@ class GridSpec:
     base : str
         Base model factory name (e.g. ``milky_way_disk_halo``).
     axes : dict
-        Dot-path keys → list of values, e.g. ``{"halo.v0": [3.4, 3.7]}``.
+        Dot-path keys → list of values, e.g. ``{"halo.v0": [3.4, 3.7]}`` or
+        ``{"disk_kinematics.sigma_r0": [0.85, 1.0]}``,
+        ``{"disk_kinematics.toomre_q_target": [1.2, 1.5]}``.
     omit_components : list of list of str
         Component omission patterns applied via ``enabled=False``.
     grid_mode : str
@@ -38,8 +51,12 @@ class GridSpec:
     grid_dr, grid_nr, grid_lmax : optional
         Explicit DBH Poisson grid overrides [kpc], [bins], [multipole order].
         Applied after ``coarse_grid`` coarsening when expanding the grid.
-        With ``coarse_grid=True``, ``lmax`` is capped at 4 so legacy ``diskdf``
+        With ``coarse_grid=True``, ``lmax`` is capped at 4 so Python ``diskdf``
         produces a valid ``cordbh.dat``.
+    physics_backend : str, optional
+        IC numerics backend: ``"python"`` (default) or ``"legacy"`` (Fortran
+        ``legacy/bin`` subprocesses). Set ``GALACTICSICS_PHYSICS_BACKEND=legacy``
+        to override globally.
     """
 
     name: str = "mw_grid"
@@ -53,6 +70,8 @@ class GridSpec:
     grid_dr: float | None = None
     grid_nr: int | None = None
     grid_lmax: int | None = None
+    physics_backend: str = "python"
+    patch: dict[str, Any] = field(default_factory=dict)
 
 
 def _base_model(name: str) -> GalaxyModel:
@@ -105,9 +124,12 @@ def _coarsen_grid(model: GalaxyModel) -> GalaxyModel:
     from galacticsics.models import PotentialGrid
 
     g = model.grid
+    nr = min(g.nr, 4000)
+    if model.disk and model.disk.enabled and nr < 4000:
+        nr = 4000
     return replace(
         model,
-        grid=PotentialGrid(dr=max(g.dr, 0.05), nr=min(g.nr, 4000), lmax=min(g.lmax, 4)),
+        grid=PotentialGrid(dr=max(g.dr, 0.05), nr=nr, lmax=min(g.lmax, 4)),
     )
 
 
@@ -122,6 +144,32 @@ def _clamp_coarse_lmax(model: GalaxyModel) -> GalaxyModel:
         model,
         grid=PotentialGrid(dr=g.dr, nr=g.nr, lmax=COARSE_GRID_LMAX_CAP),
     )
+
+
+def assert_dbh_grid_diskdf_compatible(model: GalaxyModel) -> None:
+    """
+    Raise when the Poisson grid is too coarse for Python ``diskdf``.
+
+    Collapsed ``cordbh.dat`` (``f_d`` clipped to ``1e-3``) and near-static disk
+    ICs are the usual symptom of violating these limits.
+    """
+    if not (model.disk and model.disk.enabled):
+        return
+    g = model.grid
+    problems: list[str] = []
+    if g.nr < 1000:
+        problems.append(f"nr={g.nr} is too small (use coarse_grid=True or nr≥4000)")
+    if g.nr <= 4000 and g.lmax > COARSE_GRID_LMAX_CAP:
+        problems.append(
+            f"lmax={g.lmax} is too high for nr={g.nr} (cap lmax at {COARSE_GRID_LMAX_CAP})"
+        )
+    if problems:
+        raise ValueError(
+            "DBH grid is incompatible with diskdf: "
+            + "; ".join(problems)
+            + ". "
+            + format_dbh_grid_summary(model)
+        )
 
 
 def apply_dbh_grid(
@@ -147,12 +195,67 @@ def apply_dbh_grid(
     )
 
 
+def _apply_patch(model: GalaxyModel, patch: dict[str, Any]) -> GalaxyModel:
+    for key, value in patch.items():
+        model = _set_nested(model, key, value)
+    return model
+
+
+def model_patch_defaults(base: str = "milky_way_disk_halo") -> dict[str, Any]:
+    """
+    Flatten default physical parameters for ``base`` into dot-path patch keys.
+
+    Used to populate notebook / JSON ``base_model.patch``.  Units: lengths [kpc],
+    velocities [100 km/s], masses [GalactICS mass units ≈ 2.325×10⁹ M☉].
+    Poisson grid (``grid.dr``, ``grid.nr``, ``grid.lmax``) is configured separately
+    under ``base_model.grid``.
+    """
+    model = _base_model(base)
+    patch: dict[str, Any] = {}
+    for comp in PATCHABLE_COMPONENTS:
+        obj = getattr(model, comp, None)
+        if obj is None or not is_dataclass(obj):
+            continue
+        for f in fields(obj):
+            if f.name == "enabled":
+                continue
+            patch[f"{comp}.{f.name}"] = getattr(obj, f.name)
+    return patch
+
+
+def model_component_parameter_table(
+    model: GalaxyModel,
+) -> "pd.DataFrame":
+    """All patchable component fields on a :class:`~galacticsics.models.GalaxyModel`."""
+    import pandas as pd
+
+    rows: list[dict[str, Any]] = []
+    for comp in PATCHABLE_COMPONENTS:
+        obj = getattr(model, comp, None)
+        if obj is None or not is_dataclass(obj):
+            continue
+        for f in fields(obj):
+            if f.name == "enabled":
+                continue
+            rows.append(
+                {
+                    "parameter": f"{comp}.{f.name}",
+                    "value": getattr(obj, f.name),
+                    "enabled": getattr(obj, "enabled", True),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _apply_grid_spec(model: GalaxyModel, spec: GridSpec) -> GalaxyModel:
     if spec.coarse_grid:
         model = _coarsen_grid(model)
     model = apply_dbh_grid(model, dr=spec.grid_dr, nr=spec.grid_nr, lmax=spec.grid_lmax)
     if spec.coarse_grid:
         model = _clamp_coarse_lmax(model)
+    if spec.patch:
+        model = _apply_patch(model, spec.patch)
+    assert_dbh_grid_diskdf_compatible(model)
     return model
 
 

@@ -66,6 +66,44 @@ def simpson_integrate(func, a: float, b: float, n: int = 128) -> float:
     return float(integrate.simpson(y, x=x))
 
 
+def simpson_on_grid(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Simpson integration on a tabulated curve.
+
+  Parameters
+    ----------
+    y, x : ndarray
+        Samples with ``len(x) >= 3``; ``x`` must be strictly increasing.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if len(x) < 3:
+        raise ValueError("simpson_on_grid requires at least three nodes")
+    return float(integrate.simpson(y, x=x))
+
+
+def quadrature_node_count(n: int, *, minimum: int = 3) -> int:
+    """Return an odd node count suitable for Simpson quadrature."""
+    count = max(minimum, n)
+    if count % 2 == 0:
+        count += 1
+    return count
+
+
+def sech2_stable(x: float) -> float:
+    """
+    ``sech(x)**2`` without overflowing ``cosh`` at large ``|x|``.
+
+    For ``|x| > 20`` the value is below float64 resolution and returns ``0``.
+    """
+    ax = abs(x)
+    if ax > 20.0:
+        return 0.0
+    ex = math.exp(ax)
+    emx = 1.0 / ex
+    return 4.0 / (ex + emx) ** 2
+
+
 def bounded_maximize(func, a: float, b: float, *, xtol: float = 1e-6) -> float:
     """Find argmax on [a,b] replacing golden.c (for unimodal functions)."""
     result = minimize_scalar(lambda x: -func(x), bounds=(a, b), method="bounded", options={"xatol": xtol})

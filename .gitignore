@@ -37,6 +37,17 @@ src/**/.ruff_cache/
 # --- Notebook outputs (regenerated locally) ---
 .ipynb_checkpoints/
 notebooks/artifacts/
+# Includes solve_bench/, campaign_walkthrough/, nfw_walkthrough/, etc.
+
+# --- Simulation & campaign run outputs (regenerated locally) ---
+run_output/
+runs/
+*.prof
+
+# --- Ad-hoc example / ML exports (repo-root default filenames) ---
+/particle_features.npz
+/features.npz
+/latent.npz
 
 # --- Generated test artifacts (produced by `make generate-artifacts`) ---
 tests/generated/

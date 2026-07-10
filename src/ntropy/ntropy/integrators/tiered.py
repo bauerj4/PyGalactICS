@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Literal
 
 import numpy as np
@@ -27,7 +28,7 @@ from ntropy.units import code_time_to_gyr
 def run_tiered_leapfrog(
     state: ParticleState,
     registry: TypeRegistry,
-    accel_fn: Callable[[np.ndarray], np.ndarray],
+    accel_fn: Callable[..., np.ndarray],
     *,
     ts_config: TimestepConfig,
     end_time_gyr: float,
@@ -35,7 +36,9 @@ def run_tiered_leapfrog(
     energy_every: int = 0,
     diagnostics_every: int = 1,
     record_accel: bool = True,
+    diagnostics_jsonl: str | Path | None = None,
     on_record: Callable[[int, ParticleState, np.ndarray], None] | None = None,
+    particle_dump_every: int | None = None,
     show_progress: bool = False,
     progress_desc: str | None = None,
     progress_style: Literal["ntropy", "tqdm", "both"] = "ntropy",
@@ -62,7 +65,9 @@ def run_tiered_leapfrog(
     registry : TypeRegistry
         Type metadata (softening defaults and bin limits per type).
     accel_fn : callable
-        ``accel_fn(pos) -> acc`` with ``acc`` shaped ``(N, 3)`` [code units].
+        ``accel_fn(pos)`` or ``accel_fn(pos, active_idx)`` returning accelerations
+        shaped ``(N, 3)`` [code units].  When ``active_idx`` is provided, only
+        those particles need fresh force values (stale values elsewhere are OK).
     ts_config : TimestepConfig
         Base timestep, ``eta``, and bin hierarchy settings.
     end_time_gyr : float
@@ -78,8 +83,11 @@ def run_tiered_leapfrog(
     record_accel : bool
         When true, include mean ``|a|`` in diagnostic records.
     on_record : callable, optional
-        ``on_record(step, state_snapshot, acc)`` invoked whenever aggregate
-        diagnostics are written (for per-particle ``.npz`` dumps).
+        ``on_record(step, state_snapshot, acc)`` for per-particle ``.npz`` dumps.
+    particle_dump_every : int, optional
+        When set with ``on_record``, invoke the callback only on substeps where
+        ``step % particle_dump_every == 0``.  ``None`` keeps legacy behaviour
+        (callback on every diagnostic substep).
 
     Returns
     -------
@@ -130,6 +138,7 @@ def run_tiered_leapfrog(
         dt_base=ts_config.dt_base,
         max_bin=ts_config.max_bin,
         e0=e0,
+        jsonl_path=Path(diagnostics_jsonl) if diagnostics_jsonl is not None else None,
     )
 
     acc = accel_fn(pos)
@@ -169,11 +178,17 @@ def run_tiered_leapfrog(
             max_bin=ts_config.max_bin,
             acc=current_acc if record_accel else None,
         )
-        diag_log.steps.append(record)
+        diag_log.record(record)
         if ntropy_reporter is not None:
             ntropy_reporter.update(record)
         if on_record is not None:
-            on_record(step_idx, _snapshot_state(), current_acc)
+            dump_step = (
+                particle_dump_every is None
+                or particle_dump_every <= 0
+                or step_idx % particle_dump_every == 0
+            )
+            if dump_step:
+                on_record(step_idx, _snapshot_state(), current_acc)
 
     _maybe_record(0, n_active=state.n, current_acc=acc)
     if ntropy_reporter is not None:
@@ -202,7 +217,7 @@ def run_tiered_leapfrog(
         if active_idx.size == 0:
             continue
 
-        acc = accel_fn(pos)
+        acc = accel_fn(pos, active_idx)
 
         if order == 1:
             pos_a, vel_a = leapfrog1_step(
@@ -215,7 +230,7 @@ def run_tiered_leapfrog(
                 pos[active_idx], vel[active_idx], acc[active_idx], ts_config.dt_base
             )
             pos[active_idx] = pos_half
-            acc = accel_fn(pos)
+            acc = accel_fn(pos, active_idx)
             vel[active_idx] = vel_half + 0.5 * ts_config.dt_base * acc[active_idx]
 
         if step % ts_config.update_every == 0:

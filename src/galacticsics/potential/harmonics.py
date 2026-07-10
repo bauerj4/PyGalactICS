@@ -9,7 +9,8 @@ Attributes on :class:`HarmonicPotential` map directly to Fortran COMMON-block
 arrays in ``legacy/fortran/commonblocks``:
 
 - ``apot[l, ir]`` — potential harmonics
-- ``fr[l, ir]`` — radial force gradient harmonics
+- ``fr[l, ir]`` — radial force gradient harmonics (``dPsi/dr`` multipoles)
+- ``fr2[l, ir]`` — midplane ``d²Psi/dr²`` harmonics (fourth ``dbh.dat`` block)
 - ``adens[l, ir]`` — density harmonics
 
 See Also
@@ -52,6 +53,7 @@ class HarmonicPotential:
     adens: np.ndarray  # shape (n_harm, nr+1)
     apot: np.ndarray  # shape (n_harm, nr+1)
     fr: np.ndarray  # shape (n_harm, nr+1)
+    fr2: np.ndarray | None = None  # shape (n_harm, nr+1); optional for older dbh files
 
     @property
     def dr(self) -> float:

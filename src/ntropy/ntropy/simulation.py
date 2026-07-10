@@ -21,6 +21,7 @@ from ntropy.integrators.rk import rk2_step, rk3_step, rk4_step
 from ntropy.integrators.tiered import run_tiered_leapfrog
 from ntropy.integrators.timestep import TimestepConfig
 from ntropy.parallel.mpi import mpi_rank0
+from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
 from ntropy.softening import total_energy
 from ntropy.units import code_time_to_gyr, code_time_to_myr
@@ -79,9 +80,30 @@ class Simulation:
             parallel_enabled=config.parallel.enabled,
             n_workers=config.parallel.n_workers,
         )
+        self._accel_cache: np.ndarray | None = None
 
-    def _accel_at_pos(self, pos: np.ndarray) -> np.ndarray:
-        acc = self._force_ctx.accel_at_pos(self.state, pos)
+    def _accel_at_pos(
+        self,
+        pos: np.ndarray,
+        *,
+        target_indices: np.ndarray | None = None,
+    ) -> np.ndarray:
+        use_subset = (
+            target_indices is not None
+            and self.config.force.active_subset
+            and len(target_indices) < self.state.n
+        )
+        if not use_subset:
+            acc = self._force_ctx.accel_at_pos(self.state, pos)
+            self._accel_cache = acc
+        else:
+            if self._accel_cache is None or self._accel_cache.shape[0] != self.state.n:
+                self._accel_cache = np.zeros((self.state.n, 3), dtype=float)
+            partial = self._force_ctx.accel_at_pos(
+                self.state, pos, target_indices=target_indices
+            )
+            self._accel_cache[target_indices] = partial
+            acc = self._accel_cache
         self._force_ctx.after_force_eval()
         return acc
 
@@ -155,11 +177,14 @@ class Simulation:
         particles_dir = output_dir / "particles" if output_dir else None
         dump_every = out.particle_dump_every or out.diagnostics_every
         progress_jsonl = None
+        diagnostics_jsonl = None
         io_rank0 = mpi_rank0()
         if output_dir is not None and out.diagnostics_every > 0:
             progress_jsonl = str(output_dir / "diagnostics.progress.jsonl")
-            if show_progress and io_rank0:
+            if io_rank0:
                 (output_dir / "diagnostics.progress.jsonl").write_text("")
+                diagnostics_jsonl = output_dir / "diagnostics.jsonl"
+                diagnostics_jsonl.write_text("")
 
         def _maybe_dump(step: int, snap: ParticleState, acc: np.ndarray) -> None:
             if not io_rank0:
@@ -174,10 +199,13 @@ class Simulation:
                 acc=acc,
             )
 
-        def accel_fn(pos: np.ndarray) -> np.ndarray:
+        def accel_fn(
+            pos: np.ndarray,
+            active_idx: np.ndarray | None = None,
+        ) -> np.ndarray:
             nonlocal last_acc
             self.state.pos = pos
-            last_acc = self._accel_at_pos(pos)
+            last_acc = self._accel_at_pos(pos, target_indices=active_idx)
             return last_acc
 
         state, energies, diag_log = run_tiered_leapfrog(
@@ -189,7 +217,9 @@ class Simulation:
             order=integ.order,
             energy_every=max(0, out.every),
             diagnostics_every=out.diagnostics_every,
+            diagnostics_jsonl=diagnostics_jsonl if io_rank0 else None,
             on_record=_maybe_dump if out.write_particle_bins else None,
+            particle_dump_every=dump_every if out.write_particle_bins else None,
             show_progress=show_progress,
             progress_desc=progress_desc,
             progress_style="ntropy",

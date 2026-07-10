@@ -21,7 +21,7 @@ help:
 	@echo "Targets:"
 	@echo "  install-dev    Create .venv, install galacticsics + ntropy (mpi4py when OpenMPI available), generate test artifacts"
 	@echo "  install-system-mpi  Install OpenMPI system packages for mpi4py (Debian/dnf/Homebrew)"
-	@echo "  generate-artifacts  Run dbh+diskdf+sampling -> tests/generated/reference"
+	@echo "  generate-artifacts  Run Python dbh+diskdf+sampling -> tests/generated/reference"
 	@echo "  legacy-build   Build dbh -> legacy/bin/"
 	@echo "  legacy-samplers Build gendisk, genhalo, genbulge, diskdf, getfreqs"
 	@echo "  test           Run pytest"
@@ -52,7 +52,7 @@ install-python-deps: $(VENV)/bin/python install-system-mpi
 
 install-dev: install-python-deps generate-artifacts
 
-generate-artifacts: legacy-build legacy-samplers
+generate-artifacts:
 	$(PY) -m galacticsics.artifacts.cli generate
 
 legacy-build:

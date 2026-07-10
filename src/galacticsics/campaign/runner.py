@@ -29,6 +29,60 @@ from galacticsics.models import GalaxyModel
 
 Stage = Literal["solve", "sample", "evolve"]
 
+# Filenames in a model work dir that are not legacy ascii IC components.
+_IC_SKIP_NAMES = frozenset(
+    {
+        "in.dbh",
+        "in.gendenspsi",
+        "model.json",
+        "ntropy_config.json",
+        "ic_state.npz",
+        "merged.dat",
+        "toomre2.5",
+        "evolve_result.json",
+        "dbh.dat",
+        "mr.dat",
+        "h.dat",
+        "cordbh.dat",
+        "freqdbh.dat",
+        "denspsihalo.dat",
+        "denspsibulge.dat",
+        "dfnfw.dat",
+        "dfsersic.dat",
+        "dfhalo.table",
+    }
+)
+
+
+def _ic_component_names(work_dir: Path, *, preferred: tuple[str, ...] = ()) -> list[str]:
+    """Discover legacy ascii IC files (no extension) in ``work_dir``."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in preferred:
+        if name in seen:
+            continue
+        if (work_dir / name).is_file():
+            names.append(name)
+            seen.add(name)
+    for path in sorted(work_dir.iterdir()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        name = path.name
+        if name in seen or name in _IC_SKIP_NAMES or "." in name:
+            continue
+        names.append(name)
+        seen.add(name)
+    return names
+
+
+def _load_ic_particles(work_dir: Path, *, preferred: tuple[str, ...] = ()) -> dict:
+    from galacticsics.sampling.particles import ParticleSet
+
+    particles: dict = {}
+    for name in _ic_component_names(work_dir, preferred=preferred):
+        particles[name] = ParticleSet.from_ascii(work_dir / name, component=name)
+    return particles
+
 
 def _model_done_marker(work_dir: Path, stage: Stage) -> Path:
     return work_dir / f".done_{stage}"
@@ -76,26 +130,67 @@ def _scoped_parallel_env(budget: ParallelBudget) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def _invalidate_diskdf_artifacts(work_dir: Path) -> None:
+    """Drop disk DF tables so sample re-runs ``diskdf`` against fresh ``dbh.dat``."""
+    for name in ("cordbh.dat", "toomre2.5"):
+        path = work_dir / name
+        if path.is_file():
+            path.unlink()
+
+
+def _cached_ics_unstable(
+    work_dir: Path,
+    *,
+    counts: dict[str, int],
+    eps_by_component: dict[str, float] | None,
+    type_registry,
+) -> bool:
+    """True when on-disk ICs fail :func:`ic_looks_stable` heuristics."""
+    if counts.get("disk", 0) <= 0:
+        return False
+    try:
+        from galacticsics.campaign.benchmarks import ic_looks_stable
+        from ntropy.integrations.galacticsics import merge_galacticsics_components
+
+        particles = _load_ic_particles(work_dir, preferred=tuple(counts))
+        if not particles:
+            return False
+        state = merge_galacticsics_components(
+            particles,
+            type_registry=type_registry,
+            eps_by_component=eps_by_component or {},
+        )
+        return not ic_looks_stable(state)
+    except Exception:
+        return False
+
+
 def _run_solve(
     model: GalaxyModel,
     work_dir: Path,
     *,
     progress: CampaignProgress | None = None,
+    backend: str | None = None,
+    solve_kwargs: dict | None = None,
 ) -> dict:
     from galacticsics.potential.solver import solve_potential
 
+    solve_kwargs = solve_kwargs or {}
     stream = progress.stream_output if progress else False
     if progress:
-        progress.legacy_command("dbh", str(work_dir))
+        progress.legacy_command(f"dbh ({backend or 'python'})", str(work_dir))
     t0 = time.perf_counter()
     result = solve_potential(
         model,
         work_dir=work_dir,
         cleanup=False,
         stream_output=stream,
+        backend=backend,
+        **solve_kwargs,
     )
     elapsed = time.perf_counter() - t0
     diag = result.diagnostics
+    _invalidate_diskdf_artifacts(work_dir)
     return {
         "solve_seconds": elapsed,
         "rtidal": getattr(diag, "tidal_radius", None),
@@ -107,41 +202,120 @@ def _run_sample(
     model: GalaxyModel,
     work_dir: Path,
     *,
-    n_disk: int,
-    n_halo: int,
-    n_bulge: int,
+    particles_by_component: dict[str, int] | None = None,
+    n_disk: int = 0,
+    n_halo: int = 0,
+    n_bulge: int = 0,
     progress: CampaignProgress | None = None,
+    backend: str | None = None,
+    eps_by_component: dict[str, float] | None = None,
+    type_registry=None,
+    raw_config: dict | None = None,
 ) -> dict:
     from galacticsics.builder import GalaxyBuilder
+    from galacticsics.campaign.run_config import (
+        build_type_registry,
+        default_walkthrough_config,
+        particles_by_component as parse_particles,
+        sample_config_kwargs,
+        softening_eps_by_component,
+    )
+
+    if particles_by_component is None:
+        particles_by_component = {
+            "disk": n_disk,
+            "halo": n_halo,
+            "bulge": n_bulge,
+        }
+    counts = dict(particles_by_component)
+    if not (model.disk and model.disk.enabled):
+        counts["disk"] = 0
+    if not (model.halo and model.halo.enabled):
+        counts["halo"] = 0
+    if not (model.bulge and model.bulge.enabled):
+        counts["bulge"] = 0
 
     stream = progress.stream_output if progress else False
     builder = GalaxyBuilder(model=model, model_dir=work_dir)
     t0 = time.perf_counter()
+    tag = backend or "python"
+    sample_kw = sample_config_kwargs(raw_config or default_walkthrough_config())
+    from galacticsics.sampling.openmp import openmp_sampler_status
+    from galacticsics.sampling.sampler import SampleConfig as _SampleConfig
+
+    sampler_status = openmp_sampler_status(_SampleConfig(n_disk=0, n_halo=0, **sample_kw))
     if progress:
-        if n_disk > 0 and model.disk and model.disk.enabled:
-            progress.legacy_command("gendisk (+ diskdf if needed)", str(work_dir))
-        if n_halo > 0 and model.halo and model.halo.enabled:
-            progress.legacy_command("genhalo", str(work_dir))
-        if n_bulge > 0 and model.bulge and model.bulge.enabled:
-            progress.legacy_command("genbulge", str(work_dir))
+        progress.log(f"  IC sampler: {sampler_status.log_label()}")
+
+    def _on_stage(name: str) -> None:
+        if progress:
+            if name in ("gendisk", "genhalo"):
+                progress.legacy_command(f"{name} [{sampler_status.log_label()}]", str(work_dir))
+            else:
+                progress.legacy_command(f"{name} [{tag}]", str(work_dir))
+
     builder.sample(
-        n_disk=n_disk if model.disk and model.disk.enabled else 0,
-        n_halo=n_halo if model.halo and model.halo.enabled else 0,
-        n_bulge=n_bulge if model.bulge and model.bulge.enabled else 0,
+        n_disk=counts.get("disk", 0),
+        n_halo=counts.get("halo", 0),
+        n_bulge=counts.get("bulge", 0),
         work_dir=str(work_dir),
         cleanup=False,
         stream_output=stream,
+        backend=backend,
+        progress_log=progress.log if progress and progress.enabled else None,
+        on_stage=_on_stage,
+        **sample_kw,
     )
-    counts = _validate_particle_files(work_dir)
+    file_counts = _validate_particle_files(work_dir)
     if progress:
-        parts = [f"{name}={n:,}" for name, n in sorted(counts.items())]
-        progress.log(f"  sampled {sum(counts.values()):,} particles ({', '.join(parts)})")
-    return {
+        parts = [f"{name}={n:,}" for name, n in sorted(file_counts.items())]
+        progress.log(f"  sampled {sum(file_counts.values()):,} particles ({', '.join(parts)})")
+    summary = {
         "sample_seconds": time.perf_counter() - t0,
         "particles_dir": str(work_dir),
-        "n_particles": sum(counts.values()),
-        **{f"n_{k}": v for k, v in counts.items()},
+        "n_particles": sum(file_counts.values()),
+        **{f"n_{k}": v for k, v in file_counts.items()},
     }
+    from galacticsics.io.formats import read_toomre_q
+
+    toomre_path = work_dir / "toomre2.5"
+    if toomre_path.is_file():
+        summary["toomre_q"] = read_toomre_q(toomre_path)
+    try:
+        from ntropy.integrations.galacticsics import merge_galacticsics_components
+
+        cfg = raw_config or default_walkthrough_config()
+        if eps_by_component is None:
+            eps_by_component = softening_eps_by_component(cfg)
+        registry = type_registry or build_type_registry(cfg)
+        particles = _load_ic_particles(work_dir, preferred=tuple(counts))
+        if particles:
+            state = merge_galacticsics_components(
+                particles,
+                type_registry=registry,
+                eps_by_component=eps_by_component,
+            )
+            from galacticsics.campaign.benchmarks import (
+                diagnose_ic_stability,
+                explain_ic_instability,
+                ic_looks_stable,
+            )
+
+            ic_diag = diagnose_ic_stability(state)
+            summary["ic_velocity_diag"] = ic_diag
+            if counts.get("disk", 0) > 0 and not ic_looks_stable(state):
+                raise RuntimeError(
+                    f"disk IC velocity structure looks wrong: {explain_ic_instability(diag=ic_diag)} "
+                    f"(diag={ic_diag}). Re-run solve+sample with skip_done=False."
+                )
+            summary["rotation_curve_ic"] = _write_rotation_diagnostics(
+                work_dir, state, model=model, label="ic"
+            )
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+    return summary
 
 
 def _default_force_method() -> str:
@@ -156,6 +330,19 @@ def _default_force_method() -> str:
     return "bh"
 
 
+def _default_bh_optimizations() -> "BhOptimizationsConfig":
+    """Use optimized C kernels when bh_c is built; else legacy."""
+    from ntropy.config import BhOptimizationsConfig
+
+    try:
+        from ntropy.forces.bhtree_c import extension_available
+
+        preset = "optimized" if extension_available() else "legacy"
+    except ImportError:
+        preset = "legacy"
+    return BhOptimizationsConfig.from_preset(preset)  # type: ignore[arg-type]
+
+
 def _write_evolve_config(
     work_dir: Path,
     registry,
@@ -165,6 +352,10 @@ def _write_evolve_config(
     particle_dump_every: int,
     mpi_ranks: int,
     force_method: str | None = None,
+    bh_optimizations: "BhOptimizationsConfig | None" = None,
+    force_rebuild_every: int = 5,
+    force_theta: float = 0.6,
+    force_active_subset: bool = True,
     dt_base: float = 0.025,
     timestep_eta: float = 0.025,
     max_timestep_bin: int = 6,
@@ -173,6 +364,7 @@ def _write_evolve_config(
 ) -> Path:
     cfg_path = work_dir / "ntropy_config.json"
     method = force_method or _default_force_method()
+    bh_opts = bh_optimizations or _default_bh_optimizations()
     parallel = {
         "enabled": mpi_ranks > 1,
         "n_workers": max(1, mpi_ranks),
@@ -181,7 +373,13 @@ def _write_evolve_config(
     cfg_data = {
         "particles": {"file": "merged.dat"},
         "particle_types": registry.to_config_dict(),
-        "force": {"method": method, "theta": 0.5, "rebuild_every": 1},
+        "force": {
+            "method": method,
+            "theta": force_theta,
+            "rebuild_every": force_rebuild_every,
+            "active_subset": force_active_subset,
+            "bh_optimizations": bh_opts.to_config_dict(),
+        },
         "parallel": parallel,
         "integrator": {
             "type": "tiered_leapfrog",
@@ -218,10 +416,9 @@ def _write_evolve_config(
 
 def _particle_file_counts(work_dir: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for name in ("disk", "halo", "bulge"):
+    for name in _ic_component_names(work_dir):
         path = work_dir / name
-        if path.is_file():
-            counts[name] = sum(1 for line in path.read_text().splitlines() if line.strip())
+        counts[name] = sum(1 for line in path.read_text().splitlines() if line.strip())
     return counts
 
 
@@ -257,6 +454,51 @@ def _save_ic_state(state, work_dir: Path) -> Path:
     return path
 
 
+def _write_rotation_diagnostics(
+    work_dir: Path,
+    state,
+    *,
+    model: GalaxyModel | None = None,
+    label: str,
+) -> str:
+    from galacticsics.diagnostics.rotation_curve import write_rotation_curve_diagnostic
+
+    path = write_rotation_curve_diagnostic(
+        work_dir, state=state, model=model, label=label
+    )
+    return str(path)
+
+
+def _load_ic_state(work_dir: Path):
+    from ntropy.particles import ParticleState
+
+    ic_path = work_dir / "ic_state.npz"
+    if not ic_path.is_file():
+        return None
+    with np.load(ic_path, allow_pickle=True) as data:
+        kwargs = {
+            "pos": data["pos"],
+            "vel": data["vel"],
+            "mass": data["mass"],
+            "eps": data["eps"],
+        }
+        if "type_id" in data:
+            kwargs["type_id"] = data["type_id"]
+        return ParticleState.from_arrays(**kwargs)
+
+
+def _load_final_state(work_dir: Path):
+    from ntropy.particles import ParticleState
+
+    final_path = work_dir / "evolution" / "final.dat"
+    if not final_path.is_file():
+        return None
+    from ntropy.config import load_config
+
+    cfg = load_config(work_dir / "ntropy_config.json")
+    return ParticleState.from_file(final_path, config=cfg)
+
+
 def _run_evolve(
     work_dir: Path,
     *,
@@ -265,32 +507,45 @@ def _run_evolve(
     particle_dump_every: int = 50,
     mpi_ranks: int = 1,
     core_fraction: float = 0.75,
+    force_rebuild_every: int = 5,
+    force_theta: float = 0.6,
+    force_active_subset: bool = True,
     dt_base: float = 0.025,
     timestep_eta: float = 0.025,
     max_timestep_bin: int = 6,
     timestep_update_every: int = 1,
     integrator_order: int = 2,
+    bh_optimizations: "BhOptimizationsConfig | None" = None,
+    eps_by_component: dict[str, float] | None = None,
+    type_registry=None,
+    raw_config: dict | None = None,
     progress: CampaignProgress | None = None,
     evolve_label: str = "evolve",
 ) -> dict:
-    from galacticsics.sampling.particles import ParticleSet
+    from galacticsics.campaign.run_config import (
+        build_type_registry,
+        default_walkthrough_config,
+        softening_eps_by_component,
+    )
     from ntropy.config import load_config
     from ntropy.integrations.galacticsics import merge_galacticsics_components
-    from ntropy.particle_types import TypeRegistry
     from ntropy.simulation import Simulation
 
-    registry = TypeRegistry.default_galaxy()
-    particles: dict = {}
-    for name in ("halo", "bulge", "disk"):
-        path = work_dir / name
-        if path.exists():
-            particles[name] = ParticleSet.from_ascii(path, component=name)
+    walk_cfg = raw_config or default_walkthrough_config()
+    if eps_by_component is None:
+        eps_by_component = softening_eps_by_component(walk_cfg)
+    registry = type_registry or build_type_registry(walk_cfg)
+    particles = _load_ic_particles(work_dir)
 
     if not particles:
         raise FileNotFoundError(f"no particle files in {work_dir}")
 
     _validate_particle_files(work_dir)
-    state = merge_galacticsics_components(particles, type_registry=registry)
+    state = merge_galacticsics_components(
+        particles,
+        type_registry=registry,
+        eps_by_component=eps_by_component,
+    )
     if state.n < 1:
         raise RuntimeError(f"merged particle state is empty in {work_dir}")
 
@@ -300,6 +555,7 @@ def _run_evolve(
         core_fraction=core_fraction,
     )
     effective_mpi_ranks = parallel_budget.mpi_ranks if use_mpi else 1
+    bh_opts = bh_optimizations or _default_bh_optimizations()
     if progress and progress.enabled:
         if use_mpi and effective_mpi_ranks != mpi_ranks:
             progress.log(
@@ -307,6 +563,9 @@ def _run_evolve(
                 f"(core budget {parallel_budget.budget_cores})"
             )
         progress.log(f"  parallel: {format_parallel_budget(parallel_budget)}")
+        progress.log(
+            f"  force: {_default_force_method()} | bh_optimizations preset={bh_opts.preset}"
+        )
 
     cfg_path = _write_evolve_config(
         work_dir,
@@ -315,6 +574,10 @@ def _run_evolve(
         diagnostics_every=diagnostics_every,
         particle_dump_every=particle_dump_every,
         mpi_ranks=effective_mpi_ranks,
+        bh_optimizations=bh_opts,
+        force_rebuild_every=force_rebuild_every,
+        force_theta=force_theta,
+        force_active_subset=force_active_subset,
         dt_base=dt_base,
         timestep_eta=timestep_eta,
         max_timestep_bin=max_timestep_bin,
@@ -323,6 +586,23 @@ def _run_evolve(
     )
     state.write_ascii(work_dir / "merged.dat")
     _save_ic_state(state, work_dir)
+    ic_rot_path = _write_rotation_diagnostics(work_dir, state, label="ic")
+
+    from galacticsics.campaign.benchmarks import (
+        diagnose_ic_stability,
+        explain_ic_instability,
+        ic_looks_stable,
+    )
+
+    ic_diag = diagnose_ic_stability(state)
+    if not ic_looks_stable(state):
+        msg = (
+            f"refusing to evolve with unstable ICs: {explain_ic_instability(diag=ic_diag)} "
+            f"(diag={ic_diag}). Re-run solve+sample with skip_done=False."
+        )
+        if progress and progress.enabled:
+            progress.log(f"  ERROR: {msg}")
+        raise RuntimeError(msg)
 
     if use_mpi:
         from ntropy.benchmark.mpi_subprocess import run_mpirun_simulation
@@ -382,6 +662,12 @@ def _run_evolve(
             "n_energies": payload.get("n_energies"),
             "n_ranks": payload.get("n_ranks", effective_mpi_ranks),
             "mpi": True,
+            "rotation_curve_ic": ic_rot_path,
+            "rotation_curve_final": _write_rotation_diagnostics(
+                work_dir,
+                _load_final_state(work_dir),
+                label="final",
+            ),
         }
 
     if progress and mpi_ranks > 1:
@@ -401,12 +687,17 @@ def _run_evolve(
     e0 = result.energies[0] if result.energies else 0.0
     ef = result.energies[-1] if result.energies else 0.0
     dE = abs(ef - e0) / max(abs(e0), 1e-30)
+    final_rot_path = _write_rotation_diagnostics(
+        work_dir, result.final_state, label="final"
+    )
     return {
         "evolve_seconds": elapsed,
         "dE_over_E0": dE,
         "n_energies": len(result.energies),
         "n_ranks": 1,
         "mpi": False,
+        "rotation_curve_ic": ic_rot_path,
+        "rotation_curve_final": final_rot_path,
     }
 
 
@@ -415,6 +706,7 @@ def run_campaign(
     work_root: Path | str,
     *,
     stages: list[Stage] | None = None,
+    particles_by_component: dict[str, int] | None = None,
     n_disk: int = 5000,
     n_halo: int = 10000,
     n_bulge: int = 2000,
@@ -428,8 +720,16 @@ def run_campaign(
     particle_dump_every: int = 50,
     skip_done: bool = True,
     verbose: bool = True,
-    mpi_ranks: int = 2,
+    mpi_ranks: int = 1,
     core_fraction: float = 0.75,
+    force_rebuild_every: int = 5,
+    force_theta: float = 0.6,
+    force_active_subset: bool = True,
+    bh_optimizations_preset: str = "optimized",
+    bh_optimizations_extra: dict | None = None,
+    eps_by_component: dict[str, float] | None = None,
+    raw_config: dict | None = None,
+    solve_kwargs: dict | None = None,
     progress: CampaignProgress | None = None,
 ) -> CampaignManifest:
     """
@@ -444,7 +744,9 @@ def run_campaign(
     stages : list of str, optional
         Subset of ``solve``, ``sample``, ``evolve``.
     n_disk, n_halo, n_bulge : int
-        Particle counts for sampling stage.
+        Particle counts for sampling (legacy; prefer ``particles_by_component``).
+    particles_by_component : dict, optional
+        Per-component IC counts keyed by label (e.g. ``disk``, ``halo``, ``gas``).
     end_time_gyr : float
         Evolution duration for ntropy stage.
     dt_base : float
@@ -466,10 +768,18 @@ def run_campaign(
     verbose : bool
         Print timestamped stage logs, ETAs, and stream legacy/MPI output.
     mpi_ranks : int
-        MPI ranks for ntropy evolve (``2`` by default).  Falls back to
-        serial when ``mpi4py`` or ``mpirun`` is unavailable.
+        MPI ranks for ntropy evolve (``1`` by default for single-node CPU).
+        Use ``2``+ only when ``mpi4py`` and ``mpirun`` are available and
+        particle count is large enough to amortize communication.
     core_fraction : float
         Share of logical CPUs for MPI×OpenMP (default ``0.75``).
+    force_rebuild_every : int
+        Rebuild Barnes–Hut tree every N fine substeps (default ``5``).
+        Larger values reduce tree-build overhead on CPU at the cost of
+        slightly lower force accuracy between rebuilds.
+    bh_optimizations_preset : {'legacy', 'optimized'}
+        C Barnes–Hut kernel preset written to ``ntropy_config.json``
+        (only applies when ``force.method`` is ``bh_c``).
     progress : CampaignProgress, optional
         Custom progress reporter (defaults to :class:`CampaignProgress`).
 
@@ -484,19 +794,55 @@ def run_campaign(
 
     reporter = progress if progress is not None else CampaignProgress(enabled=verbose)
     models = list(expand_grid(spec))
+    from galacticsics.physics.backend import resolve_physics_backend
+    from ntropy.config import BhOptimizationsConfig
+
+    physics_backend = resolve_physics_backend(spec.physics_backend).value
+    if bh_optimizations_preset not in ("legacy", "optimized"):
+        raise ValueError(
+            f"bh_optimizations_preset must be 'legacy' or 'optimized', "
+            f"got {bh_optimizations_preset!r}"
+        )
+    bh_optimizations = BhOptimizationsConfig.from_dict(
+        {"preset": bh_optimizations_preset, **(bh_optimizations_extra or {})}
+    )
+    from galacticsics.campaign.run_config import (
+        build_type_registry,
+        default_walkthrough_config,
+        particles_by_component as parse_particles,
+        softening_eps_by_component,
+    )
+
+    cfg = raw_config or default_walkthrough_config()
+    if particles_by_component is None:
+        particles_by_component = parse_particles(cfg)
+        if not any(particles_by_component.values()):
+            particles_by_component = {"disk": n_disk, "halo": n_halo, "bulge": n_bulge}
+    if eps_by_component is None:
+        eps_by_component = softening_eps_by_component(cfg)
+    type_registry = build_type_registry(cfg)
+    parts_summary = ", ".join(
+        f"{k}={v:,}" for k, v in sorted(particles_by_component.items()) if v
+    )
     reporter.banner(
         name=spec.name,
         work_root=str(work_root),
         stages=stages,
         n_models=len(models),
         extra={
-            "particles": f"{n_disk:,} disk + {n_halo:,} halo",
+            "particles": parts_summary or "none",
             "end_time_gyr": end_time_gyr,
             "dt_base": dt_base,
             "mpi_ranks": mpi_ranks,
             "core_fraction": core_fraction,
+            "bh_optimizations": bh_optimizations.preset,
+            "force_theta": force_theta,
+            "force_active_subset": force_active_subset,
+            "force_rebuild_every": force_rebuild_every,
+            "softening_kpc": eps_by_component,
             "diagnostics_every": diagnostics_every,
             "skip_done": skip_done,
+            "physics_backend": physics_backend,
         },
     )
 
@@ -520,7 +866,13 @@ def run_campaign(
                     detail=f"dbh (nr={model.grid.nr}, lmax={model.grid.lmax})",
                 )
                 t0 = time.perf_counter()
-                summary = _run_solve(model, model_dir, progress=reporter)
+                summary = _run_solve(
+                    model,
+                    model_dir,
+                    progress=reporter,
+                    backend=physics_backend,
+                    solve_kwargs=solve_kwargs,
+                )
                 row.update(summary)
                 reporter.end_stage("solve", time.perf_counter() - t0, summary)
                 marker.touch()
@@ -534,24 +886,45 @@ def run_campaign(
                 and sum(sample_counts.values()) > 0
             )
             if sample_done:
-                reporter.skip_stage("sample", reason=".done_sample")
-            else:
+                if _cached_ics_unstable(
+                    model_dir,
+                    counts=particles_by_component,
+                    eps_by_component=eps_by_component,
+                    type_registry=type_registry,
+                ):
+                    from galacticsics.campaign.benchmarks import invalidate_ic_artifacts
+
+                    removed = invalidate_ic_artifacts(
+                        model_dir,
+                        include_evolve=False,
+                        include_solve_marker=False,
+                    )
+                    reporter.log(
+                        "  cached ICs look unstable — re-running sample"
+                        + (f" (removed {', '.join(removed)})" if removed else "")
+                    )
+                    sample_done = False
+                else:
+                    reporter.skip_stage("sample", reason=".done_sample")
+            if not sample_done:
                 if skip_done and marker.exists():
                     reporter.log(
                         "  sample marker present but particle files empty — re-running sample"
                     )
                 reporter.start_stage(
                     "sample",
-                    detail=f"n_disk={n_disk:,}, n_halo={n_halo:,}, n_bulge={n_bulge:,}",
+                    detail=parts_summary or "no particles requested",
                 )
                 t0 = time.perf_counter()
                 summary = _run_sample(
                     model,
                     model_dir,
-                    n_disk=n_disk,
-                    n_halo=n_halo,
-                    n_bulge=n_bulge,
+                    particles_by_component=particles_by_component,
                     progress=reporter,
+                    backend=physics_backend,
+                    eps_by_component=eps_by_component,
+                    type_registry=type_registry,
+                    raw_config=cfg,
                 )
                 row.update(summary)
                 reporter.end_stage("sample", time.perf_counter() - t0, summary)
@@ -591,11 +964,18 @@ def run_campaign(
                     particle_dump_every=particle_dump_every,
                     mpi_ranks=mpi_ranks,
                     core_fraction=core_fraction,
+                    force_rebuild_every=force_rebuild_every,
+                    force_theta=force_theta,
+                    force_active_subset=force_active_subset,
                     dt_base=dt_base,
                     timestep_eta=timestep_eta,
                     max_timestep_bin=max_timestep_bin,
                     timestep_update_every=timestep_update_every,
                     integrator_order=integrator_order,
+                    bh_optimizations=bh_optimizations,
+                    eps_by_component=eps_by_component,
+                    type_registry=type_registry,
+                    raw_config=cfg,
                     progress=reporter,
                     evolve_label=f"{label} evolve",
                 )
@@ -608,3 +988,49 @@ def run_campaign(
 
     reporter.finish()
     return manifest
+
+
+def run_campaign_from_config(
+    config_path: Path | str,
+    *,
+    work_root: Path | str | None = None,
+    grid_spec: GridSpec | None = None,
+    repo: Path | str | None = None,
+    raw: dict | None = None,
+) -> CampaignManifest:
+    """
+    Run a campaign from a walkthrough JSON config (see ``notebooks/campaigns/``).
+
+    Parameters
+    ----------
+    config_path : path
+        JSON file with ``particles``, ``evolve``, ``force``, and ``base_model`` blocks.
+    work_root : path, optional
+        Override output root (default: ``artifacts.base_mw`` or ``artifacts.runs``).
+    grid_spec : GridSpec, optional
+        Override grid definition (default: from config ``base_model.grid`` or sweep).
+    repo : path, optional
+        Repository root for resolving relative paths.
+    raw : dict, optional
+        In-memory config (e.g. notebook ``CONFIG``); overrides on-disk JSON.
+    """
+    from galacticsics.campaign.run_config import WalkthroughConfig, load_walkthrough_config
+
+    if raw is not None:
+        cfg = WalkthroughConfig.from_raw(
+            raw, config_path=Path(config_path), repo=Path(repo) if repo else None
+        )
+    else:
+        cfg = load_walkthrough_config(config_path, repo=Path(repo) if repo else None)
+    cfg.ensure_artifact_dirs()
+    spec = grid_spec or cfg.base_grid
+    root = Path(work_root) if work_root is not None else cfg.paths.base_root
+    kwargs = dict(cfg.run_campaign_kwargs())
+    extra = kwargs.pop("bh_optimizations_extra", None)
+    kwargs["raw_config"] = cfg.raw
+    return run_campaign(
+        spec,
+        root,
+        bh_optimizations_extra=extra,
+        **kwargs,
+    )

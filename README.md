@@ -57,7 +57,7 @@ Package-level API docs: [`src/ntropy/README.md`](src/ntropy/README.md).
 | Area | Details |
 |------|---------|
 | **Particle I/O** | GalactICS ASCII (`mass x y z vx vy vz`); optional `nobj flag` header |
-| **Softening** | Per-particle Plummer; pairwise \(h_{ij} = \tfrac{1}{2}(\varepsilon_i+\varepsilon_j)\) |
+| **Softening** | Per-particle Plummer; pairwise $h_{ij} = \tfrac{1}{2}(\varepsilon_i+\varepsilon_j)$ |
 | **Forces** | `brute` (vectorized O(N²)), `bh` (pure-Python octree), **`bh_c`** (C octree) |
 | **Integrators** | Leapfrog orders 1–2 (symplectic); Euler, RK2, RK3, RK4 (explicit, non-symplectic) |
 | **Parallelism** | mpi4py Morton (Z-order) domain decomposition; Gadget-2-style assignment |
@@ -136,7 +136,7 @@ End-to-end **GalactICS IC → ntropy validation** for a spherical NFW halo:
 
 | Section | Content |
 |---------|---------|
-| **§1** | `GalaxyModel` → legacy `dbh` → `genhalo`; typed Python API |
+| **§1** | `GalaxyModel` → Python `dbh` → halo sampling; typed Python API |
 | **§2** | Initial ρ(r) vs analytic NFW; sanity check on sampled IC |
 | **§3** | Brute vs Barnes–Hut force accuracy vs opening angle θ |
 | **§4** | Serial/MPI/integrator scaling: brute vs `bh_c` (N and ranks 1–8; leapfrog order 1 vs 2) |
@@ -161,11 +161,12 @@ jupyter notebook notebooks/nfw_halo_walkthrough.ipynb
 | Layer | Location | Role |
 |-------|----------|------|
 | **Python API** | `src/galacticsics/` | Typed models, SciPy numerics, tests, docs |
-| **Legacy numerics** | `legacy/fortran/` | Unmodified graduate-school Fortran/C |
-| **Bridge** | `galacticsics.legacy` | Writes `in.dbh`, runs `legacy/bin/dbh`, reads `dbh.dat` |
+| **Python physics** | `galacticsics.potential.poisson`, `sampling.python` | Default IC pipeline: `dbh`, diskdf, gendisk/genhalo/genbulge |
+| **Legacy numerics** | `legacy/fortran/` | Optional Fortran/C reference (opt-in via `GALACTICSICS_PHYSICS_BACKEND=legacy`) |
+| **Bridge** | `galacticsics.legacy` | Subprocess runner when legacy backend is selected |
 
-Python code never `#include`s or `import`s Fortran. New numerics use
-`scipy.interpolate.CubicSpline`, `scipy.special.eval_legendre`, and
+Python code never `#include`s or `import`s Fortran. The default backend uses
+`scipy.interpolate`, `scipy.special.eval_legendre`, and
 `scipy.integrate.simpson` instead of `splined.f`, `plgndr1.f`, and `simpson.c`.
 
 ## Units
@@ -278,7 +279,9 @@ psi = evaluate_potential(builder.potential, s=8.0, z=0.0)
 print(f"Psi(solar neighborhood) = {psi:.4f}")
 ```
 
-### Solve a new potential (calls legacy dbh)
+### Solve a new potential (Python `dbh` by default)
+
+Set ``GALACTICSICS_PHYSICS_BACKEND=legacy`` to use Fortran ``legacy/bin/dbh`` instead.
 
 ```bash
 make example-solve
@@ -295,6 +298,17 @@ result = solve_potential(model, cleanup=False)
 print("Tidal radius:", result.diagnostics.tidal_radius, "kpc")
 print("Work dir:", result.diagnostics.work_dir)
 ```
+
+**Performance.** Full Milky Way grids (`nr ≈ 20000`) can take several minutes.
+For faster iteration use a coarser grid (`preview_dbh_model(..., coarse=True)`) or
+parallelize shell integration:
+
+```python
+solve_potential(model, n_workers=4)  # or export GALACTICSICS_SOLVE_WORKERS=4
+```
+
+Benchmark: `python scripts/benchmark_solve.py --base milky_way_disk_halo --n-workers 4`.
+Variable glossary and vectorization notes: [`docs/dbh_python_backend.md`](docs/dbh_python_backend.md).
 
 ### Two-step halo-first workflow
 
@@ -476,48 +490,58 @@ GalactICSIsoWithGas/
 
 ## Algorithms (mathematical detail)
 
+Full pipeline documentation (Poisson solver, disk DF $f(E, L_z, E_z)$, module
+reference, campaign/notebook integration, mermaid diagram):
+[`docs/galacticsics_pipeline.md`](docs/galacticsics_pipeline.md). Python-backend
+performance and `dbh.dat` naming:
+[`docs/dbh_python_backend.md`](docs/dbh_python_backend.md).
+
 ### Coordinate system and units
 
-GalactICS uses cylindrical coordinates \((s,\phi,z)\) with \(G=1\). Masses are in
-\(M_\mathrm{unit} = 2.325\times 10^9\,M_\odot\). Velocities are in \(100\,\mathrm{km\,s^{-1}}\).
-The potential \(\Psi\) is defined so that the circular velocity satisfies
-\(v_c^2 = s\,\partial\Psi/\partial s\) on the midplane.
+GalactICS uses cylindrical coordinates $(s,\phi,z)$ with $G=1$. Masses are in
+$M_\mathrm{unit} = 2.325\times 10^9\,M_\odot$. Velocities are in $100\,\mathrm{km\,s^{-1}}$.
+The potential $\Psi$ is defined so that the circular velocity satisfies
+$v_c^2 = s\,\partial\Psi/\partial s$ on the midplane.
 
 ### Multipole Poisson solver (`dbh`)
 
-The total mass density is expanded in even Legendre polynomials \(P_l(\cos\theta)\)
-on a radial grid \(r_i = i\,\Delta r\), \(i=0\ldots N_r\):
+The total mass density is expanded in even Legendre polynomials $P_l(\cos\theta)$
+on a radial grid $r_i = i\,\Delta r$, $i=0\ldots N_r$:
 
-\[
+
+$$
 \rho(s,z) = \sum_{l=0}^{l_\mathrm{max}} \rho_l(r)\,P_l(\cos\theta),
 \qquad r=\sqrt{s^2+z^2},\quad \cos\theta = z/r.
-\]
+$$
+
 
 Each iteration of `dbh.f`:
 
-1. **Density harmonics** — for each \((l, r_i)\), integrate \(\rho(s,z)\,P_l(\cos\theta)\)
-   over the meridional plane (Simpson in \(\cos\theta\); see lines 253–270 of `dbh.f`).
+1. **Density harmonics** — for each $(l, r_i)$, integrate $\rho(s,z)\,P_l(\cos\theta)$
+   over the meridional plane (Simpson in $\cos\theta$; see lines 253–270 of `dbh.f`).
 
 2. **Potential from density** — for each harmonic, apply the spherical Poisson
    solution (Binney & Tremaine eq. 2-208, implemented in `halopotentialestimate.f`
    and the main loop):
 
-\[
+
+$$
 \Phi_l(r) = \frac{4\pi}{2l+1}\left[
   \frac{1}{r^{l}}\int_0^r \rho_l(r')\,r'^{l+2}\,dr'
   + r^{l+1}\int_r^\infty \rho_l(r')\,\frac{dr'}{r'^{l-1}}
 \right].
-\]
+$$
 
-The radial force harmonic follows from \(F_{r,l} = -\partial\Phi_l/\partial r\)
+
+The radial force harmonic follows from $F_{r,l} = -\partial\Phi_l/\partial r$
 with the same split integrals (`s1`, `s2` arrays in `dbh.f`).
 
-3. **Self-consistency** — the density \(\rho\) is evaluated in the *current*
+3. **Self-consistency** — the density $\rho$ is evaluated in the *current*
    potential via DFs and analytic disk/gas approximations (`dens`, `totdens`,
-   `polardens`). The tidal radius \(R_t\) is where \(\Psi(R_t,0)=\Psi_c\) on the
-   midplane; iteration continues until \(|R_t^{(n)}-R_t^{(n-1)}| < \Delta r\).
+   `polardens`). The tidal radius $R_t$ is where $\Psi(R_t,0)=\Psi_c$ on the
+   midplane; iteration continues until $|R_t^{(n)}-R_t^{(n-1)}| < \Delta r$.
 
-4. **Harmonic ramp** — \(l_\mathrm{max}\) increases in steps of 2 after the
+4. **Harmonic ramp** — $l_\mathrm{max}$ increases in steps of 2 after the
    monopole tidal radius stabilizes.
 
 **Outputs in `dbh.dat`**: three blocks of coefficients on the same grid —
@@ -527,33 +551,37 @@ with the same split integrals (`s1`, `s2` arrays in `dbh.f`).
 
 After the full solve, if `ihaloflag=1`, subroutine `halopotential` recomputes the
 Poisson harmonics of the **halo density alone** (NFW profile + Eddington DF) and
-writes them to `h.dat`. The monopole at \(r=0\) is extrapolated quadratically;
-higher multipoles are zero at the origin; each harmonic is shifted so \(\Phi_l\to 0\)
-at \(r=R_\mathrm{edge}\).
+writes them to `h.dat`. The monopole at $r=0$ is extrapolated quadratically;
+higher multipoles are zero at the origin; each harmonic is shifted so $\Phi_l\to 0$
+at $r=R_\mathrm{edge}$.
 
 `getfreqs.f` reads `dbh.dat` first (total model), then `h.dat` (halo only), and
-tabulates epicyclic frequencies \(\Omega_h(s)\), \(\nu_h(s)\) along the major axis
+tabulates epicyclic frequencies $\Omega_h(s)$, $\nu_h(s)$ along the major axis
 and an inclined axis — needed by `diskdf` for the asymmetric drift integrals.
 
 ### NFW halo
 
 Volume density (`halodensity`):
 
-\[
+
+$$
 \rho_\mathrm{NFW}(r) = \frac{\rho_0}{r/a\,(1+r/a)^2}
 \quad\text{with}\quad
 \rho_0 = \frac{2^{1-c}\,v_0^2}{4\pi a^2}.
-\]
+$$
+
 
 The distribution function is obtained by **Eddington inversion** on the spherical
-potential \(\Psi(r)\):
+potential $\Psi(r)$:
 
-\[
+
+$$
 f(E) = \frac{1}{\sqrt{8\pi^2}}\left[
   \int_0^E \frac{d^2\rho}{d\Psi^2}\,\frac{d\Psi}{\sqrt{E-\Psi}}
   + \left.\frac{d\rho/d\Psi}{\sqrt{E-\Psi}}\right|_{\Psi=0}
 \right],
-\]
+$$
+
 
 tabulated on an energy grid (`gendfnfw`, `denspsihalo.dat`, `dfnfw.dat`).
 
@@ -561,16 +589,20 @@ tabulated on an energy grid (`gendfnfw`, `denspsihalo.dat`, `dfnfw.dat`).
 
 Midplane surface density with erfc truncation:
 
-\[
+
+$$
 \Sigma(R) = \frac{M}{2\pi R_d^2}\,
 \exp(-R/R_d)\cdot \tfrac{1}{2}\mathrm{erfc}\!\left(\frac{R-R_\mathrm{out}}{\Delta R}\right).
-\]
+$$
+
 
 Vertical profile:
 
-\[
+
+$$
 \rho(R,z) = \frac{\Sigma(R)}{2z_d}\,\mathrm{sech}^2(z/z_d).
-\]
+$$
+
 
 The disk contributes a **non-multipole** approximate potential (`appdiskpot.f`)
 that is added in `pot.f` / `force.f` alongside the harmonic part.
@@ -579,25 +611,27 @@ that is added in `pot.f` / `force.f` alongside the harmonic part.
 
 The action-based disk DF is corrected iteratively (`diskdf.f`):
 
-1. Assume epicyclic approximation with \(\sigma_R(s)\) from `sigr2`.
-2. For each radius, integrate over \((v_R, v_z, v_\phi)\) to match the imposed
+1. Assume epicyclic approximation with $\sigma_R(s)$ from `sigr2`.
+2. For each radius, integrate over $(v_R, v_z, v_\phi)$ to match the imposed
    surface density and velocity dispersions.
 3. Update spline correction factors `fdrat`, `fszrat` → written to `cordbh.dat`.
 
-Toomre \(Q\) at \(R=2.5 R_d\):
+Toomre $Q$ at $R=2.5 R_d$:
 
-\[
+
+$$
 Q = \frac{\sigma_R}{\sigma_\mathrm{crit}},
 \qquad
 \sigma_\mathrm{crit} = \frac{3.36\,\Sigma}{ \kappa }
-\]
+$$
 
-where \(\kappa\) is the radial epicyclic frequency from `omekap`.
+
+where $\kappa$ is the radial epicyclic frequency from `omekap`.
 
 ### Particle sampling
 
-- **`genhalo`**: rejection sampling from \(f(E)\) with optional streaming fraction.
-- **`gendisk`**: rejection in \((R,z,v_R,v_z,v_\phi)\) using `cordbh.dat` corrections.
+- **`genhalo`**: rejection sampling from $f(E)$ with optional streaming fraction.
+- **`gendisk`**: rejection in $(R,z,v_R,v_z,v_\phi)$ using `cordbh.dat` corrections.
 - **`genbulge`**: spherical Sersic/NFW bulge from `dfsersic.dat`.
 
 Particle format: ASCII lines `mass x y z vx vy vz` (GalactICS units).
@@ -622,11 +656,11 @@ The legacy code always supported this via `h.dat` + the `in.dbh_disk` pattern
 
 ### Step 1 — Fit / solve the halo
 
-**Option A — analytic NFW**: choose \((v_0, a, R_\mathrm{outer})\), run `dbh`
+**Option A — analytic NFW**: choose $(v_0, a, R_\mathrm{outer})$, run `dbh`
 with only the halo enabled (`GalaxyModel.with_halo_only()`).
 
 **Option B — particles**: center with `centre1.c` logic
-(`galacticsics.fitting.center_particles_on_core`), bin \(M(<r)\), fit NFW scale
+(`galacticsics.fitting.center_particles_on_core`), bin $M(<r)$, fit NFW scale
 (`estimate_nfw_from_particles`), then run step A.
 
 **Artifacts** (in `work_dir`):
@@ -634,7 +668,7 @@ with only the halo enabled (`GalaxyModel.with_halo_only()`).
 | File | Content |
 |------|---------|
 | `dbh.dat` | Halo-only total multipole |
-| `h.dat` | Isolated halo \(\Phi_l\), \(F_{r,l}\) (`halopotential.f`) |
+| `h.dat` | Isolated halo $\Phi_l$, $F_{r,l}$ (`halopotential.f`) |
 | `denspsihalo.dat`, `dfnfw.dat` | Eddington DF tables |
 | `mr.dat` | Integrated halo mass / scale radius |
 
@@ -645,11 +679,13 @@ with only the halo enabled (`GalaxyModel.with_halo_only()`).
    `GalaxyModel.with_baryons_only()`.
 3. **Merge harmonics** (Python: `merge_harmonic_potentials`):
 
-\[
+
+$$
 \Phi_l^\mathrm{tot} = \Phi_l^\mathrm{halo} + \Phi_l^\mathrm{baryon},
 \quad
 F_{r,l}^\mathrm{tot} = F_{r,l}^\mathrm{halo} + F_{r,l}^\mathrm{baryon}.
-\]
+$$
+
 
 4. Write merged `dbh.dat`; run `getfreqs` (needs both `dbh.dat` and `h.dat`).
 5. Run `diskdf` → `cordbh.dat`; sample with `gendisk` / `genbulge`.
@@ -726,6 +762,17 @@ Generated Milky Way reference artifacts drive most integration tests. Regenerate
 | `test_nfw_halo_only_fixture` | `GalaxyModel.nfw_halo_only()` enables halo, disables disk/bulge |
 | `test_sersic_bulge_only_fixture` | Bulge-only model flags and parameters |
 | `test_nfw_plus_bulge_fixture` | Combined halo+bulge model construction |
+
+#### `test_physics_python.py` — Python physics backend
+
+| Test | What it checks |
+|------|----------------|
+| `test_python_solve_writes_dbh` | Python solve writes `dbh.dat`, `h.dat`, `freqdbh.dat` |
+| `test_python_getfreqs_engineering_parity` | Python `getfreqs` matches legacy table on same `dbh.dat` |
+| `test_python_diskdf_valid_cordbh` | Python `diskdf` produces valid `cordbh.dat` |
+| `test_python_sample_moments` | Python disk/halo sampling COM and σ_R |
+| `test_python_bulge_disk_halo_solve` | Three-component solve + bulge DF tables |
+| `test_python_sample_bulge` | Python bulge rejection sampling |
 
 #### `test_sampling_milkyway.py` — particle sampling statistics
 

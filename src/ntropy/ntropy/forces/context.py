@@ -12,6 +12,7 @@ from ntropy.forces.bhtree import BarnesHutTree, compute_forces_bh
 from ntropy.forces.bhtree_c import BarnesHutTreeC, compute_forces_bh_c, extension_available
 from ntropy.forces.brute import compute_forces_brute
 from ntropy.parallel.pool import compute_forces_parallel
+from ntropy.parallel.mpi import MpiForceCache
 
 if TYPE_CHECKING:
     from ntropy.particles import ParticleState
@@ -42,6 +43,7 @@ class ForceContext:
     _bh_tree: BarnesHutTree | None = field(default=None, repr=False)
     _bh_c_tree: BarnesHutTreeC | None = field(default=None, repr=False)
     _step_count: int = field(default=0, repr=False)
+    _mpi_cache: MpiForceCache = field(default_factory=MpiForceCache, repr=False)
 
     def _should_rebuild_tree(self) -> bool:
         """True when the cached tree should be rebuilt this evaluation."""
@@ -85,6 +87,9 @@ class ForceContext:
                 method=method,
                 theta=theta,
                 n_workers=self.n_workers,
+                bh_opts=self.config.bh_optimizations,
+                cache=self._mpi_cache,
+                rebuild=self._should_rebuild_tree(),
             )
             if target_indices is not None:
                 return acc[target_indices]
@@ -101,8 +106,11 @@ class ForceContext:
                     "force.method='bh_c' requires the C extension; "
                     "pip install -e src/ntropy"
                 )
+            bh_opts = self.config.bh_optimizations
             if self._should_rebuild_tree() or self._bh_c_tree is None:
-                self._bh_c_tree = BarnesHutTreeC.build(pos, mass, eps)
+                self._bh_c_tree = BarnesHutTreeC.build(
+                    pos, mass, eps, bh_opts=bh_opts
+                )
             return compute_forces_bh_c(
                 pos,
                 mass,
@@ -110,6 +118,7 @@ class ForceContext:
                 theta=theta,
                 tree=self._bh_c_tree,
                 target_indices=target_indices,
+                bh_opts=bh_opts,
             )
 
         if self._should_rebuild_tree() or self._bh_tree is None:
@@ -131,4 +140,5 @@ class ForceContext:
         """Discard cached trees (e.g. after a large position change)."""
         self._bh_tree = None
         self._bh_c_tree = None
+        self._mpi_cache.clear()
         self._step_count = 0

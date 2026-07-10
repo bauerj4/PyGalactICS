@@ -10,5 +10,6 @@
     ["bulge"]
   ],
   "coarse_grid": true,
-  "max_points": 50
+  "max_points": 50,
+  "physics_backend": "python"
 }

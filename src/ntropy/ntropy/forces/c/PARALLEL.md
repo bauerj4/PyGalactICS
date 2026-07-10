@@ -48,13 +48,25 @@ local_acc = tree.accel_targets(local_targets, theta, pos=pos, eps=eps)
 
 Use `ForceConfig.method = "bh_c"` to select this path.
 
-## Phase 2 — OpenMP within a rank
+## Phase 2 — OpenMP within a rank (implemented)
 
-Add `#pragma omp parallel for` over targets in `bh_tree_accel_targets` (or over
-the outer target loop only). Build stays serial on rank 0.
+`bh_tree_accel_targets` and `bh_tree_accel_all` use OpenMP over targets.
+Schedule is configurable via `force.bh_optimizations.omp_schedule`.
 
 **Caution:** when also using `mpirun -n R`, set OpenMP threads to avoid
 oversubscription, e.g. `OMP_NUM_THREADS = total_cores / R`.
+
+## Phase 2b — Optional C walk/build optimizations (2026-07)
+
+Controlled by `force.bh_optimizations` in JSON config (`preset: legacy|optimized`).
+See `ntropy/HISTORY.md` for the full flag table. Native pack format:
+
+| `pack_format` | Broadcast payload |
+|---------------|-------------------|
+| `0` (legacy) | `nodes` `(n_nodes, 19)` float64 rows |
+| `1` (native) | `nodes_native` `uint8` blob, `sizeof(BHNode)` per node |
+
+`meta` is `(n_nodes, n_leaf_indices, pack_format)`.
 
 ## Phase 3 — Parallel tree build (optional, large N)
 

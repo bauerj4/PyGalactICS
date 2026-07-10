@@ -24,6 +24,33 @@ MPI domain decomposition without claiming Gadget fidelity.
 | **GalactICS bridge** | `sample_galacticsics_*`, composite ICs, `nfw_halo_walkthrough.ipynb` |
 | **Packaging** | mpi4py moved to optional extra; `install-python-deps` always reinstalls ntropy on `make install-dev` |
 | **MW campaign** (current) | Integer particle types, tiered timestepping, tree persistence, OpenMP walk, DBH parameter grid |
+| **C BH optimizations** (2026-07) | Optional `force.bh_optimizations` presets (`legacy` / `optimized`): fast softening math, squared opening test, iterative walk, Morton build, native MPI pack, fast `accel_all` |
+
+### `force.bh_optimizations` (2026-07)
+
+Backward-compatible performance flags for the ``bh_c`` backend. Default ``preset: legacy`` preserves
+the original C kernels. ``preset: optimized`` enables:
+
+| Flag | Effect |
+|------|--------|
+| `fast_inv_r3` | Replace `pow(r²+h², 1.5)` with `1/sqrt(r²+h²)³` |
+| `squared_opening` | Opening criterion without `sqrt` |
+| `iterative_walk` | Explicit stack traversal instead of recursion |
+| `morton_build` | Morton-sorted particle insertion |
+| `borrow_arrays` | Skip pos/mass/eps copy on build (Python holds refs) |
+| `fast_coincident_check` | Squared distance for coincident-particle test |
+| `native_pack` | MPI broadcast raw `BHNode` bytes instead of 19-float rows |
+| `accel_all_fast` | Direct all-particle walk without index arange |
+| `simd_leaves` | 4-wide unrolled leaf interaction loop |
+| `omp_schedule` | `static` / `guided` / `dynamic` OpenMP scheduling |
+
+Example JSON::
+
+    "force": {
+      "method": "bh_c",
+      "theta": 0.5,
+      "bh_optimizations": { "preset": "optimized" }
+    }
 
 ## Performance evolution
 

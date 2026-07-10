@@ -178,6 +178,7 @@ class DiskKinematics:
     sigma_r_scale: float = 2.8  # exponential scale length for sigma_R^2 [kpc]
     n_radial_steps: int = 50
     n_iterations: int = 10
+    toomre_q_target: float | None = None  # if set, scale sigma_r0 to match Q at 2.5 R_d
 
 
 @dataclass

@@ -1,0 +1,70 @@
+{
+  "name": "mw_walkthrough",
+  "artifacts": {
+    "root": "notebooks/artifacts/campaign_walkthrough"
+  },
+  "run": {
+    "skip_done": false,
+    "verbose": true,
+    "stages": ["solve", "sample", "evolve"],
+    "reevolve_checkpoints": false
+  },
+  "particles": {
+    "disk": 100000,
+    "halo": 100000,
+    "bulge": 0
+  },
+  "softening": {
+    "disk": 0.1,
+    "halo": 0.5,
+    "bulge": 0.2
+  },
+  "parallel": {
+    "mpi_ranks": 1,
+    "core_fraction": 0.75
+  },
+  "sample": {
+    "use_openmp": true,
+    "n_openmp_threads": 0,
+    "run_diskdf": true
+  },
+  "base_model": {
+    "grid": {
+      "name": "base_mw",
+      "base": "milky_way_disk_halo",
+      "axes": {},
+      "omit_components": [[]],
+      "coarse_grid": true,
+      "physics_backend": "python"
+    },
+    "patch": {
+      "disk_kinematics.toomre_q_target": 1.5
+    }
+  },
+  "sweep": {
+    "enabled": false,
+    "grid_spec": "campaigns/mw_grid.json"
+  },
+  "evolve": {
+    "end_time_gyr": 0.5,
+    "dt_base": 0.05,
+    "timestep_eta": 0.025,
+    "max_timestep_bin": 7,
+    "timestep_update_every": 2,
+    "integrator_order": 2,
+    "diagnostics_every": 20,
+    "particle_dump_every": 100
+  },
+  "force": {
+    "theta": 0.6,
+    "rebuild_every": 10,
+    "active_subset": true,
+    "bh_optimizations_preset": "optimized",
+    "bh_optimizations": {
+      "preset": "optimized",
+      "simd_leaves": true,
+      "omp_schedule": "guided"
+    }
+  },
+  "checkpoints_gyr": [0.0, 0.05, 0.1]
+}

@@ -10,9 +10,10 @@ from typing import Optional
 
 from galacticsics.io import read_harmonic_potential
 from galacticsics.io.formats import read_component_masses, read_rtidal
-from galacticsics.io.legacy_inputs import write_dbh_input, write_gendenspsi_input
-from galacticsics.legacy.runner import LegacyRunner, LegacyRunError
+from galacticsics.legacy.runner import LegacyRunError
 from galacticsics.models import GalaxyModel
+from galacticsics.physics.backend import PhysicsBackendKind
+from galacticsics.physics.dispatch import backend_solve_potential
 from galacticsics.potential.harmonics import HarmonicPotential
 
 
@@ -62,15 +63,18 @@ def solve_potential(
     cleanup: bool = True,
     npsi: int = 1000,
     nint: int = 20,
+    max_iter: int = 100,
+    n_workers: int | None = None,
     timeout: float | None = 3600.0,
     stream_output: bool = False,
+    backend: PhysicsBackendKind | str | None = None,
 ) -> SolveResult:
     """
-    Run the legacy self-consistent Poisson solver (``dbh``).
+    Run the self-consistent Poisson solver (``dbh``).
 
-    This function writes stdin input files from ``model``, invokes the isolated
-    Fortran executable in ``legacy/bin/dbh``, and loads the resulting
-    ``dbh.dat`` into a :class:`~galacticsics.potential.harmonics.HarmonicPotential`.
+    By default the **Python** backend solves disk + halo (+ optional bulge)
+    in-process.  Pass ``backend=PhysicsBackendKind.LEGACY`` or set
+    ``GALACTICSICS_PHYSICS_BACKEND=legacy`` to invoke ``legacy/bin/dbh``.
 
     Parameters
     ----------
@@ -84,11 +88,16 @@ def solve_potential(
         If ``True`` and a temporary ``work_dir`` was created, delete it after
         reading outputs. Default is ``True``. Set ``False`` to keep artifacts.
     npsi : int, optional
-        Energy grid size for ``in.gendenspsi``. Default 1000.
+        Energy grid size for DF tables. Default 1000.
     nint : int, optional
         Integration steps for DF tables. Default 20.
+    n_workers : int, optional
+        Thread pool size for radial shell integration (``0`` = serial).  Falls back
+        to ``GALACTICSICS_SOLVE_WORKERS`` when omitted.
     timeout : float or None, optional
-        Wall-clock timeout in seconds for the ``dbh`` subprocess. Default 3600.
+        Wall-clock timeout in seconds for the legacy ``dbh`` subprocess only.
+    backend : PhysicsBackendKind or str, optional
+        ``python`` (default) or ``legacy``.
 
     Returns
     -------
@@ -98,9 +107,9 @@ def solve_potential(
     Raises
     ------
     LegacyRunError
-        If ``dbh`` exits with an error.
+        If the legacy ``dbh`` executable exits with an error.
     FileNotFoundError
-        If ``legacy/bin/dbh`` has not been built.
+        If ``legacy/bin/dbh`` has not been built when using the legacy backend.
 
     Notes
     -----
@@ -109,7 +118,12 @@ def solve_potential(
     :class:`~galacticsics.legacy.runner.LegacyRunner`.
 
     **Performance.** Full Milky Way models (``nr=20000``) may take several
-    minutes. Use smaller ``model.grid.nr`` for quick tests.
+    minutes. Use smaller ``model.grid.nr`` for quick tests.  Set ``n_workers``
+    to the number of physical cores (or ``GALACTICSICS_SOLVE_WORKERS``) to
+    parallelize polar shell integration during the Python solve.
+
+    **Variable names.** See :doc:`/docs/dbh_python_backend` for a glossary mapping
+    legacy ``dbh`` abbreviations to descriptive Python names.
 
     Examples
     --------
@@ -130,11 +144,17 @@ def solve_potential(
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-    write_gendenspsi_input(work_dir / "in.gendenspsi", npsi=npsi, nint=nint)
-    write_dbh_input(model, work_dir / "in.dbh")
-
-    runner = LegacyRunner(work_dir)
-    runner.run("dbh", stdin_path=work_dir / "in.dbh", timeout=timeout, stream_output=stream_output)
+    backend_solve_potential(
+        model,
+        work_dir,
+        backend=backend,
+        npsi=npsi,
+        nint=nint,
+        max_iter=max_iter,
+        n_workers=n_workers,
+        timeout=timeout,
+        stream_output=stream_output,
+    )
 
     dbh_path = work_dir / "dbh.dat"
     if not dbh_path.is_file():

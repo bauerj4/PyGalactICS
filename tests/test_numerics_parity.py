@@ -7,7 +7,7 @@ import pytest
 from scipy import integrate
 
 from galacticsics.io import read_disk_correction
-from galacticsics.numerics import legendre_even_l, natural_cubic_spline, simpson_integrate
+from galacticsics.numerics import legendre_even_l, natural_cubic_spline, simpson_integrate, simpson_on_grid
 from tests.constants import RTOL
 
 
@@ -28,3 +28,12 @@ def test_simpson_integrate_polynomial():
     scipy_ref = integrate.quad(lambda x: x**2, 0.0, 1.0)[0]
     assert result == pytest.approx(scipy_ref, rel=RTOL)
     assert result == pytest.approx(1.0 / 3.0, rel=RTOL)
+
+
+def test_simpson_on_grid_matches_quad():
+    x = np.linspace(0.0, 1.0, 9)
+    y = np.sin(np.pi * x)
+    grid_val = simpson_on_grid(y, x)
+    quad_val = integrate.quad(lambda t: np.sin(np.pi * t), 0.0, 1.0)[0]
+    assert grid_val == pytest.approx(quad_val, rel=1e-3)
+    assert grid_val == pytest.approx(2.0 / np.pi, rel=1e-3)

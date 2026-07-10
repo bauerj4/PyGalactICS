@@ -43,11 +43,157 @@ class SofteningConfig:
     file: str | None = None
 
 
+BhOptimPreset = Literal["legacy", "optimized"]
+BhOmpSchedule = Literal["static", "guided", "dynamic"]
+
+_BH_PRESET_LEGACY: dict[str, bool | str] = {
+    "fast_inv_r3": False,
+    "squared_opening": False,
+    "iterative_walk": False,
+    "morton_build": False,
+    "borrow_arrays": False,
+    "fast_coincident_check": False,
+    "native_pack": False,
+    "accel_all_fast": False,
+    "simd_leaves": False,
+    "omp_schedule": "static",
+}
+_BH_PRESET_OPTIMIZED: dict[str, bool | str] = {
+    "fast_inv_r3": True,
+    "squared_opening": True,
+    "iterative_walk": True,
+    "morton_build": True,
+    "borrow_arrays": True,
+    "fast_coincident_check": True,
+    "native_pack": True,
+    "accel_all_fast": True,
+    "simd_leaves": False,
+    "omp_schedule": "static",
+}
+
+
+@dataclass
+class BhOptimizationsConfig:
+    """
+    Optional C Barnes–Hut kernel optimizations (``force.bh_optimizations``).
+
+    ``preset="legacy"`` disables all optimizations (default, backwards compatible).
+    ``preset="optimized"`` enables the safe physics-preserving fast paths.
+    Individual flags override the preset when set explicitly.
+    """
+
+    preset: BhOptimPreset = "legacy"
+    fast_inv_r3: bool | None = None
+    squared_opening: bool | None = None
+    iterative_walk: bool | None = None
+    morton_build: bool | None = None
+    borrow_arrays: bool | None = None
+    fast_coincident_check: bool | None = None
+    native_pack: bool | None = None
+    accel_all_fast: bool | None = None
+    simd_leaves: bool | None = None
+    omp_schedule: BhOmpSchedule = "static"
+
+    def resolve(self) -> dict[str, bool | str]:
+        """Return effective flag values after applying preset and overrides."""
+        base = dict(_BH_PRESET_LEGACY if self.preset == "legacy" else _BH_PRESET_OPTIMIZED)
+        for key in (
+            "fast_inv_r3",
+            "squared_opening",
+            "iterative_walk",
+            "morton_build",
+            "borrow_arrays",
+            "fast_coincident_check",
+            "native_pack",
+            "accel_all_fast",
+            "simd_leaves",
+        ):
+            val = getattr(self, key)
+            if val is not None:
+                base[key] = bool(val)
+        base["omp_schedule"] = self.omp_schedule
+        return base
+
+    def to_c_opts(self) -> dict[str, int]:
+        """Map resolved flags to integer options for the C extension."""
+        r = self.resolve()
+        sched = {"static": 0, "guided": 1, "dynamic": 2}[str(r["omp_schedule"])]
+        return {
+            "fast_inv_r3": int(bool(r["fast_inv_r3"])),
+            "squared_opening": int(bool(r["squared_opening"])),
+            "iterative_walk": int(bool(r["iterative_walk"])),
+            "morton_build": int(bool(r["morton_build"])),
+            "borrow_arrays": int(bool(r["borrow_arrays"])),
+            "fast_coincident_check": int(bool(r["fast_coincident_check"])),
+            "native_pack": int(bool(r["native_pack"])),
+            "accel_all_fast": int(bool(r["accel_all_fast"])),
+            "simd_leaves": int(bool(r["simd_leaves"])),
+            "omp_schedule": sched,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> BhOptimizationsConfig:
+        if not raw:
+            return cls()
+        preset = raw.get("preset", "legacy")
+        if preset not in ("legacy", "optimized"):
+            raise ValueError(
+                f"force.bh_optimizations.preset must be 'legacy' or 'optimized', got {preset!r}"
+            )
+        sched = raw.get("omp_schedule", "static")
+        if sched not in ("static", "guided", "dynamic"):
+            raise ValueError(
+                f"force.bh_optimizations.omp_schedule must be static|guided|dynamic, got {sched!r}"
+            )
+        kwargs: dict[str, Any] = {"preset": preset, "omp_schedule": sched}
+        for key in (
+            "fast_inv_r3",
+            "squared_opening",
+            "iterative_walk",
+            "morton_build",
+            "borrow_arrays",
+            "fast_coincident_check",
+            "native_pack",
+            "accel_all_fast",
+            "simd_leaves",
+        ):
+            if key in raw:
+                kwargs[key] = bool(raw[key])
+        return cls(**kwargs)
+
+    def to_config_dict(self) -> dict[str, Any]:
+        """Serialize for ``ntropy_config.json`` (preset + explicit overrides)."""
+        out: dict[str, Any] = {"preset": self.preset}
+        if self.omp_schedule != "static":
+            out["omp_schedule"] = self.omp_schedule
+        for key in (
+            "fast_inv_r3",
+            "squared_opening",
+            "iterative_walk",
+            "morton_build",
+            "borrow_arrays",
+            "fast_coincident_check",
+            "native_pack",
+            "accel_all_fast",
+            "simd_leaves",
+        ):
+            val = getattr(self, key)
+            if val is not None:
+                out[key] = bool(val)
+        return out
+
+    @classmethod
+    def from_preset(cls, preset: BhOptimPreset) -> BhOptimizationsConfig:
+        return cls(preset=preset)
+
+
 @dataclass
 class ForceConfig:
     method: Literal["brute", "bh", "bh_c"] = "bh"
     theta: float = 0.5
     rebuild_every: int = 1
+    active_subset: bool = True
+    bh_optimizations: BhOptimizationsConfig = field(default_factory=BhOptimizationsConfig)
 
 
 IntegratorType = Literal[
@@ -291,6 +437,10 @@ def load_config(path: PathLike) -> RunConfig:
             method=method,
             theta=_validate_positive("force.theta", float(force_raw.get("theta", 0.5))),
             rebuild_every=rebuild_every,
+            active_subset=bool(force_raw.get("active_subset", True)),
+            bh_optimizations=BhOptimizationsConfig.from_dict(
+                force_raw.get("bh_optimizations")
+            ),
         ),
         integrator=IntegratorConfig(
             type=integ_type,  # type: ignore[arg-type]

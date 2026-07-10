@@ -97,13 +97,27 @@ class TieredDiagnosticsLog:
     e0 : float
         Initial total energy.
     steps : list of StepDiagnostics
-        Recorded substeps.
+        Recorded substeps (empty when ``jsonl_path`` streaming is enabled).
+    jsonl_path : Path or None
+        When set, each record is appended here instead of ``steps``.
+    n_recorded : int
+        Number of substeps written (RAM or stream).
     """
 
     dt_base: float
     max_bin: int
     e0: float
     steps: list[StepDiagnostics] = field(default_factory=list)
+    jsonl_path: Path | None = None
+    n_recorded: int = 0
+
+    def record(self, step_diag: StepDiagnostics) -> None:
+        """Store one substep record in RAM or on the streaming JSONL path."""
+        if self.jsonl_path is not None:
+            append_diagnostics_jsonl(self.jsonl_path, step_diag)
+        else:
+            self.steps.append(step_diag)
+        self.n_recorded += 1
 
 
 def _bin_histogram(bins: np.ndarray, max_bin: int) -> np.ndarray:
@@ -226,6 +240,22 @@ def write_particle_bin_dump(
     np.savez_compressed(path, **payload)
 
 
+def append_diagnostics_jsonl(path: Path, record: StepDiagnostics) -> None:
+    """Append one diagnostics record as a JSON line (streaming evolve logs)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(asdict(record)) + "\n")
+
+
+def _read_diagnostics_jsonl(jsonl_path: Path) -> list[StepDiagnostics]:
+    steps: list[StepDiagnostics] = []
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            steps.append(StepDiagnostics(**json.loads(line)))
+    return steps
+
+
 def write_diagnostics_log(log: TieredDiagnosticsLog, output_dir: Path) -> Path:
     """
     Write aggregate diagnostics to ``diagnostics.jsonl`` and ``diagnostics.csv``.
@@ -235,16 +265,19 @@ def write_diagnostics_log(log: TieredDiagnosticsLog, output_dir: Path) -> Path:
     jsonl_path : Path
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path = output_dir / "diagnostics.jsonl"
-    with open(jsonl_path, "w") as f:
-        for rec in log.steps:
-            f.write(json.dumps(asdict(rec)) + "\n")
+    jsonl_path = log.jsonl_path or (output_dir / "diagnostics.jsonl")
+    if log.jsonl_path is None:
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for rec in log.steps:
+                f.write(json.dumps(asdict(rec)) + "\n")
+
+    steps = log.steps if log.steps else _read_diagnostics_jsonl(jsonl_path)
 
     csv_path = output_dir / "diagnostics.csv"
-    if log.steps:
+    if steps:
         # Flatten per-type mean_bin into columns for easy pandas load
         type_labels = sorted(
-            {k for rec in log.steps for k in rec.by_type}
+            {k for rec in steps for k in rec.by_type}
         )
         fieldnames = [
             "step", "t_code", "t_gyr", "energy", "dE_over_E0",
@@ -256,7 +289,7 @@ def write_diagnostics_log(log: TieredDiagnosticsLog, output_dir: Path) -> Path:
         with open(csv_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            for rec in log.steps:
+            for rec in steps:
                 row: dict[str, Any] = {
                     "step": rec.step,
                     "t_code": rec.t_code,

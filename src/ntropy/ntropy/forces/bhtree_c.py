@@ -45,13 +45,17 @@ from typing import Any
 
 import numpy as np
 
+from ntropy.config import BhOptimizationsConfig
+
 try:
     from ntropy.forces import _bh_c
 except ImportError:  # pragma: no cover - extension not built
     _bh_c = None  # type: ignore[assignment]
 
-# Width of each packed node row (see NODE_PACK_WIDTH in bh_module.c).
+# Width of each packed node row (legacy format; see NODE_PACK_WIDTH in bh_module.c).
 NODE_PACK_WIDTH = 19
+PACK_FORMAT_LEGACY = 0
+PACK_FORMAT_NATIVE = 1
 
 
 def extension_available() -> bool:
@@ -70,6 +74,16 @@ def extension_available() -> bool:
     ``pytest.mark.skipif(not extension_available())``.
     """
     return _bh_c is not None
+
+
+def _c_opts(bh_opts: BhOptimizationsConfig | None) -> dict[str, int]:
+    cfg = bh_opts or BhOptimizationsConfig()
+    return cfg.to_c_opts()
+
+
+if _bh_c is not None:
+    PACK_FORMAT_LEGACY = int(_bh_c.PACK_FORMAT_LEGACY)
+    PACK_FORMAT_NATIVE = int(_bh_c.PACK_FORMAT_NATIVE)
 
 
 def _require_extension() -> Any:
@@ -129,11 +143,20 @@ class BarnesHutTreeC:
     +----------+------------------------------------------+
     """
 
-    def __init__(self, tree: Any, *, pos: np.ndarray, mass: np.ndarray, eps: np.ndarray):
+    def __init__(
+        self,
+        tree: Any,
+        *,
+        pos: np.ndarray,
+        mass: np.ndarray,
+        eps: np.ndarray,
+        bh_opts: BhOptimizationsConfig | None = None,
+    ):
         self._tree = tree
         self._pos = np.ascontiguousarray(pos, dtype=float)
         self._mass = np.ascontiguousarray(mass, dtype=float)
         self._eps = np.ascontiguousarray(eps, dtype=float)
+        self._bh_opts = bh_opts or BhOptimizationsConfig()
 
     @classmethod
     def build(
@@ -141,6 +164,8 @@ class BarnesHutTreeC:
         pos: np.ndarray,
         mass: np.ndarray,
         eps: np.ndarray | float,
+        *,
+        bh_opts: BhOptimizationsConfig | None = None,
     ) -> BarnesHutTreeC:
         """
         Build a new octree from particle arrays.
@@ -178,11 +203,16 @@ class BarnesHutTreeC:
             eps_a = np.full(len(mass_a), float(eps), dtype=float)
         else:
             eps_a = np.ascontiguousarray(eps, dtype=float)
-        tree = bh.build_tree(pos_a, mass_a, eps_a)
-        return cls(tree, pos=pos_a, mass=mass_a, eps=eps_a)
+        tree = bh.build_tree(pos_a, mass_a, eps_a, opts=_c_opts(bh_opts))
+        return cls(tree, pos=pos_a, mass=mass_a, eps=eps_a, bh_opts=bh_opts)
 
     @classmethod
-    def from_packed(cls, packed: dict[str, np.ndarray]) -> BarnesHutTreeC:
+    def from_packed(
+        cls,
+        packed: dict[str, np.ndarray],
+        *,
+        bh_opts: BhOptimizationsConfig | None = None,
+    ) -> BarnesHutTreeC:
         """
         Reconstruct a tree from :meth:`pack_buffers` output.
 
@@ -204,18 +234,38 @@ class BarnesHutTreeC:
         bound by reference (already replicated on every rank).
         """
         bh = _require_extension()
+        meta = np.asarray(packed.get("meta", np.zeros(3, dtype=np.int64)), dtype=np.int64)
+        pack_format = int(
+            packed.get(
+                "pack_format",
+                int(meta[2]) if meta.size >= 3 else PACK_FORMAT_LEGACY,
+            )
+        )
+        opts = _c_opts(bh_opts)
+        nodes = packed.get("nodes")
+        nodes_native = packed.get("nodes_native")
+        if nodes is None:
+            nodes = np.zeros((0, NODE_PACK_WIDTH), dtype=float)
         tree = bh.tree_from_packed(
-            np.ascontiguousarray(packed["nodes"], dtype=float),
+            np.ascontiguousarray(nodes, dtype=float),
             np.ascontiguousarray(packed["leaf_indices"], dtype=np.int32),
             np.ascontiguousarray(packed["pos"], dtype=float),
             np.ascontiguousarray(packed["mass"], dtype=float),
             np.ascontiguousarray(packed["eps"], dtype=float),
+            pack_format=pack_format,
+            nodes_native=(
+                None
+                if nodes_native is None
+                else np.ascontiguousarray(nodes_native, dtype=np.uint8)
+            ),
+            opts=opts,
         )
         return cls(
             tree,
             pos=packed["pos"],
             mass=packed["mass"],
             eps=packed["eps"],
+            bh_opts=bh_opts,
         )
 
     @property
@@ -359,14 +409,24 @@ class BarnesHutTreeC:
         The packed format is versioned implicitly by ``NODE_PACK_WIDTH`` (19).
         """
         raw = self._tree.pack_buffers()
-        return {
+        packed = {
             "nodes": np.asarray(raw["nodes"], dtype=float),
+            "nodes_native": np.asarray(raw["nodes_native"], dtype=np.uint8),
             "leaf_indices": np.asarray(raw["leaf_indices"], dtype=np.int32),
             "meta": np.asarray(raw["meta"], dtype=np.int64),
             "pos": np.asarray(raw["pos"], dtype=float),
             "mass": np.asarray(raw["mass"], dtype=float),
             "eps": np.asarray(raw["eps"], dtype=float),
+            "pack_format": int(
+                raw.get(
+                    "pack_format",
+                    int(np.asarray(raw["meta"], dtype=np.int64)[2])
+                    if np.asarray(raw["meta"]).size >= 3
+                    else PACK_FORMAT_LEGACY,
+                )
+            ),
         }
+        return packed
 
 
 def compute_forces_bh_c(
@@ -376,6 +436,8 @@ def compute_forces_bh_c(
     theta: float = 0.5,
     tree: BarnesHutTreeC | None = None,
     target_indices: np.ndarray | None = None,
+    *,
+    bh_opts: BhOptimizationsConfig | None = None,
 ) -> np.ndarray:
     """
     Compute Barnes–Hut accelerations with the C backend.
@@ -422,7 +484,7 @@ def compute_forces_bh_c(
     --------
     >>> acc = compute_forces_bh_c(pos, mass, eps, theta=0.3)  # doctest: +SKIP
     """
-    local_tree = tree or BarnesHutTreeC.build(pos, mass, eps)
+    local_tree = tree or BarnesHutTreeC.build(pos, mass, eps, bh_opts=bh_opts)
     if target_indices is None:
         return local_tree.accel_all(theta, pos=pos, eps=eps)
     return local_tree.accel_targets(target_indices, theta, pos=pos, eps=eps)

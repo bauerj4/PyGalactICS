@@ -32,6 +32,9 @@ def bin_spherical_density(
     mass: np.ndarray,
     n_bins: int = 20,
     r_max: float | None = None,
+    *,
+    log_bins: bool = True,
+    r_min: float | None = None,
 ) -> DensityProfile:
     """
     Bin particle mass into spherical shells to estimate ρ(r).
@@ -57,7 +60,14 @@ def bin_spherical_density(
         r_max = float(r.max()) if len(r) else 1.0
     if r_max <= 0:
         r_max = 1.0
-    edges = np.linspace(0.0, r_max, n_bins + 1)
+    if log_bins:
+        r_lo = r_min
+        if r_lo is None:
+            r_lo = max(r_max / (n_bins**2), 1e-3)
+        r_lo = min(r_lo, r_max * 0.99)
+        edges = np.logspace(np.log10(r_lo), np.log10(r_max), n_bins + 1)
+    else:
+        edges = np.linspace(0.0, r_max, n_bins + 1)
     shell_mass = np.zeros(n_bins, dtype=float)
     counts = np.zeros(n_bins, dtype=int)
     for i in range(n_bins):

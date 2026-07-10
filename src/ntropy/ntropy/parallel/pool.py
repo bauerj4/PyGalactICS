@@ -6,7 +6,8 @@ from typing import Literal
 
 import numpy as np
 
-from ntropy.parallel.mpi import compute_forces_mpi
+from ntropy.config import BhOptimizationsConfig
+from ntropy.parallel.mpi import compute_forces_mpi, MpiForceCache
 
 
 def compute_forces_parallel(
@@ -17,6 +18,9 @@ def compute_forces_parallel(
     method: Literal["brute", "bh", "bh_c"] = "bh",
     theta: float = 0.5,
     n_workers: int = 1,
+    bh_opts: BhOptimizationsConfig | None = None,
+    cache: MpiForceCache | None = None,
+    rebuild: bool = True,
 ) -> np.ndarray:
     """
     Compute forces using MPI domain decomposition.
@@ -43,4 +47,7 @@ def compute_forces_parallel(
         Accelerations.
     """
     del n_workers  # MPI communicator size defines worker count
-    return compute_forces_mpi(pos, mass, eps, method=method, theta=theta)
+    return compute_forces_mpi(
+        pos, mass, eps, method=method, theta=theta, bh_opts=bh_opts,
+        cache=cache, rebuild=rebuild,
+    )

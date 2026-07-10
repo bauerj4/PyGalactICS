@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  schedule:
+    - cron: "0 12 * * 0"
 
 jobs:
   pytest:
@@ -16,6 +18,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -e ".[dev]"
-      - name: Run tests
+          python -m pip install -e "src/ntropy[dev]"
+      - name: Run tests (Python physics backend default)
         run: |
-          pytest tests/ -v --tb=short
+          pytest tests/ src/ntropy/tests/ -v --tb=short -m "not legacy_binary"
+
+  legacy-binary:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install -e ".[dev]"
+      - name: Build legacy samplers
+        run: make legacy-build legacy-samplers
+      - name: Legacy binary regression
+        run: |
+          pytest tests/test_sampling_legacy.py -v --tb=short -m legacy_binary

@@ -49,22 +49,20 @@ class GalactICSSampleResult:
 
 def galacticsics_available() -> bool:
     """
-    Return True when galacticsics and required legacy binaries are present.
+    Return True when galacticsics can run disk+halo IC workflows.
 
-    Checks for ``dbh`` and ``genhalo`` in ``legacy/bin/``.
+    Uses the Python physics backend by default; legacy binaries are optional.
     """
     try:
-        from galacticsics.legacy.paths import require_binary
+        from galacticsics.physics.backend import physics_backend_available
 
-        require_binary("dbh")
-        require_binary("genhalo")
-        return True
-    except (ImportError, FileNotFoundError):
+        return physics_backend_available()
+    except ImportError:
         return False
 
 
 def require_galacticsics() -> None:
-    """Raise ``ImportError`` or ``FileNotFoundError`` if integration is unavailable."""
+    """Raise ``ImportError`` if integration is unavailable."""
     try:
         import galacticsics  # noqa: F401
     except ImportError as exc:
@@ -72,10 +70,16 @@ def require_galacticsics() -> None:
             "galacticsics is required for this workflow. "
             "Install from the repo root: pip install -e '.[dev]'"
         ) from exc
-    from galacticsics.legacy.paths import require_binary
+    from galacticsics.physics.backend import physics_backend_available, resolve_physics_backend
 
-    require_binary("dbh")
-    require_binary("genhalo")
+    if not physics_backend_available():
+        backend = resolve_physics_backend(None)
+        if backend.value == "legacy":
+            from galacticsics.legacy.paths import require_binary
+
+            require_binary("dbh")
+            require_binary("genhalo")
+        raise RuntimeError("galacticsics physics backend is not available")
 
 
 def particle_state_from_galacticsics(
