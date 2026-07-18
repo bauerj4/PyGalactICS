@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import math
 import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,7 +31,6 @@ from galacticsics.potential.poisson.densities import (
 )
 from galacticsics.potential.poisson.appdisk import disk_monopole_density_grid
 from galacticsics.potential.poisson.integrals import (
-    integrate_polar_density_at_shell,
     integrate_polar_density_spherical,
     monopole_estimate_from_spherical_density,
     poisson_harmonics_from_density,
@@ -162,50 +160,23 @@ def _fill_density_harmonics_at_shells(
     halo_psi_tables, bulge_psi_tables : tuple, optional
         Pre-tabulated DF lookup tables for vectorized density evaluation.
     """
-    shell_jobs = [
-        (harmonic_degree // 2, shell_index)
-        for harmonic_degree in range(0, active_lmax + 1, 2)
-        for shell_index in range(1, n_radial_shells + 1)
-    ]
+    from galacticsics.potential.poisson.fast import fill_density_harmonics
 
-    def _integrate_one_shell(harmonic_row_shell: tuple[int, int]) -> tuple[int, int, float]:
-        harmonic_row, shell_index = harmonic_row_shell
-        harmonic_degree = 2 * harmonic_row
-        shell_radius = shell_index * radial_step
-        moment = integrate_polar_density_at_shell(
-            arrays,
-            model,
-            shell_radius,
-            harmonic_degree,
-            n_polar_nodes,
-            dens_psi_halo=dens_fn_halo,
-            dens_psi_bulge=dens_fn_bulge,
-            psic=cutoff_potential,
-            halo_psi_tables=halo_psi_tables,
-            bulge_psi_tables=bulge_psi_tables,
-        )
-        return harmonic_row, shell_index, moment
-
-    if n_workers > 1:
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for harmonic_row, shell_index, moment in pool.map(_integrate_one_shell, shell_jobs):
-                density_harmonics[harmonic_row, shell_index] = moment
-    else:
-        for harmonic_row, shell_index in shell_jobs:
-            harmonic_degree = 2 * harmonic_row
-            shell_radius = shell_index * radial_step
-            density_harmonics[harmonic_row, shell_index] = integrate_polar_density_at_shell(
-                arrays,
-                model,
-                shell_radius,
-                harmonic_degree,
-                n_polar_nodes,
-                dens_psi_halo=dens_fn_halo,
-                dens_psi_bulge=dens_fn_bulge,
-                psic=cutoff_potential,
-                halo_psi_tables=halo_psi_tables,
-                bulge_psi_tables=bulge_psi_tables,
-            )
+    fill_density_harmonics(
+        density_harmonics,
+        arrays=arrays,
+        model=model,
+        radial_step=radial_step,
+        n_radial_shells=n_radial_shells,
+        active_lmax=active_lmax,
+        n_polar_nodes=n_polar_nodes,
+        dens_fn_halo=dens_fn_halo,
+        dens_fn_bulge=dens_fn_bulge,
+        cutoff_potential=cutoff_potential,
+        n_workers=n_workers,
+        halo_psi_tables=halo_psi_tables,
+        bulge_psi_tables=bulge_psi_tables,
+    )
 
 
 def _halo_density_normalization(halo) -> float:

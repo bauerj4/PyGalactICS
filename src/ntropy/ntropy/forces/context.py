@@ -90,6 +90,7 @@ class ForceContext:
                 bh_opts=self.config.bh_optimizations,
                 cache=self._mpi_cache,
                 rebuild=self._should_rebuild_tree(),
+                mpi_local_trees=self.config.mpi_local_trees,
             )
             if target_indices is not None:
                 return acc[target_indices]

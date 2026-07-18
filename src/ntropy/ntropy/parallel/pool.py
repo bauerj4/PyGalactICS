@@ -21,6 +21,7 @@ def compute_forces_parallel(
     bh_opts: BhOptimizationsConfig | None = None,
     cache: MpiForceCache | None = None,
     rebuild: bool = True,
+    mpi_local_trees: bool = True,
 ) -> np.ndarray:
     """
     Compute forces using MPI domain decomposition.
@@ -40,6 +41,8 @@ def compute_forces_parallel(
     n_workers : int
         Retained for JSON compatibility. When running under ``mpirun``,
         the MPI communicator size overrides this value.
+    mpi_local_trees : bool
+        Gadget-style local trees + LET under MPI (default True).
 
     Returns
     -------
@@ -48,6 +51,13 @@ def compute_forces_parallel(
     """
     del n_workers  # MPI communicator size defines worker count
     return compute_forces_mpi(
-        pos, mass, eps, method=method, theta=theta, bh_opts=bh_opts,
-        cache=cache, rebuild=rebuild,
+        pos,
+        mass,
+        eps,
+        method=method,
+        theta=theta,
+        bh_opts=bh_opts,
+        cache=cache,
+        rebuild=rebuild,
+        mpi_local_trees=mpi_local_trees,
     )

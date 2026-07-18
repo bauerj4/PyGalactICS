@@ -52,7 +52,7 @@ def test_run_tiered_writes_diagnostics_and_callback(tmp_path: Path):
     state.type_id = np.ones(state.n, dtype=np.int32)
     dumps: list[int] = []
 
-    def accel(pos: np.ndarray) -> np.ndarray:
+    def accel(pos: np.ndarray, active_idx: np.ndarray | None = None) -> np.ndarray:
         from ntropy.forces.brute import compute_forces_brute
         return compute_forces_brute(pos, state.mass, state.eps)
 
@@ -89,7 +89,7 @@ def test_run_tiered_streams_diagnostics_without_ram_growth(tmp_path: Path):
     jsonl_path = tmp_path / "diagnostics.jsonl"
     jsonl_path.write_text("")
 
-    def accel(pos: np.ndarray) -> np.ndarray:
+    def accel(pos: np.ndarray, active_idx: np.ndarray | None = None) -> np.ndarray:
         from ntropy.forces.brute import compute_forces_brute
         return compute_forces_brute(pos, state.mass, state.eps)
 

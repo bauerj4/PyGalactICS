@@ -114,6 +114,242 @@ def disk_vertical_derivatives(z: float, zdisk: float) -> tuple[float, float, flo
     return math.log(cosh_zz), math.tanh(zz), 1.0 / (cosh_zz * cosh_zz)
 
 
+def disk_surface_radial_derivatives_batch(
+    r: np.ndarray,
+    disk: ExponentialDisk,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized :func:`disk_surface_radial_derivatives`."""
+    radii = np.asarray(r, dtype=float)
+    eerfc = np.zeros_like(radii)
+    eexp = np.zeros_like(radii)
+    t = np.sqrt(0.5) * (radii - disk.outer_radius) / disk.trunc_width
+    t2 = t * t
+    low = t < -4.0
+    mid = (t >= -4.0) & (t < 4.0)
+    eerfc[low] = 1.0
+    if np.any(mid):
+        tm = t[mid]
+        t2m = t2[mid]
+        eexp[mid] = np.exp(-t2m) / math.sqrt(2.0 * math.pi) / disk.trunc_width
+        eerfc[mid] = 0.5 * np.vectorize(math.erfc)(tm)
+
+    dc = disk.disk_const
+    rd = disk.scale_length
+    arg1 = -radii / rd
+    if disk.hole_radius == 0.0:
+        sg = dc * np.exp(arg1)
+        sg1 = -dc / rd * np.exp(arg1)
+        sg2 = dc / (rd * rd) * np.exp(arg1)
+    else:
+        tmp2 = np.sqrt(radii * radii + disk.hole_radius**2)
+        arg2 = -tmp2 / disk.core_radius
+        sg = dc * (np.exp(arg1) - np.exp(arg2))
+        sg1 = dc * (-np.exp(arg1) / rd + radii / disk.core_radius / tmp2 * np.exp(arg2))
+        sg2 = dc * (
+            np.exp(arg1) / (rd * rd)
+            + np.exp(arg2)
+            * (disk.core_radius * disk.hole_radius**2 - radii * radii * tmp2)
+            / (disk.core_radius**2 * tmp2**3)
+        )
+
+    f = sg * eerfc
+    f1r = np.zeros_like(radii)
+    f2 = np.zeros_like(radii)
+    positive = radii > 0.0
+    if np.any(positive):
+        rp = radii[positive]
+        fp = f[positive]
+        sg1p = sg1[positive]
+        sg2p = sg2[positive]
+        eerfcp = eerfc[positive]
+        eexpp = eexp[positive]
+        f1r[positive] = (sg1p * eerfcp + eexpp * fp) / rp
+        f2[positive] = (
+            sg2p * eerfcp
+            + 2.0 * sg1p * eexpp
+            + eexpp * ((rp - disk.outer_radius) / disk.trunc_width**2) * fp
+        )
+    return f, f1r, f2
+
+
+def disk_vertical_derivatives_batch(
+    z: np.ndarray,
+    zdisk: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized :func:`disk_vertical_derivatives`."""
+    z_arr = np.asarray(z, dtype=float)
+    zz = z_arr / zdisk
+    g = np.zeros_like(z_arr)
+    g1 = np.zeros_like(z_arr)
+    g2 = np.zeros_like(z_arr)
+    large = np.abs(zz) > 50.0
+    finite = ~large
+    if np.any(large):
+        g[large] = np.abs(zz[large])
+        g1[large] = np.sign(zz[large])
+    if np.any(finite):
+        zzf = zz[finite]
+        cosh_zz = np.cosh(zzf)
+        g[finite] = np.log(cosh_zz)
+        g1[finite] = np.tanh(zzf)
+        g2[finite] = 1.0 / (cosh_zz * cosh_zz)
+    return g, g1, g2
+
+
+def approximate_disk_density_batch(
+    s: np.ndarray,
+    z: np.ndarray,
+    model: GalaxyModel,
+) -> np.ndarray:
+    """Vectorized :func:`approximate_disk_density`."""
+    disk = model.disk
+    s_arr = np.asarray(s, dtype=float)
+    if disk is None or not disk.enabled:
+        return np.zeros_like(s_arr, dtype=float)
+    z_arr = np.asarray(z, dtype=float)
+    r = np.hypot(s_arr, z_arr)
+    f, f1r, f2 = disk_surface_radial_derivatives_batch(r, disk)
+    g, g1, g2 = disk_vertical_derivatives_batch(z_arr, disk.scale_height)
+    h = disk.scale_height
+    return 0.5 * (f2 * h * g + 2.0 * f1r * g * h + 2.0 * f1r * g1 * z_arr + f * g2 / h)
+
+
+def approximate_disk_potential_batch(
+    s: np.ndarray,
+    z: np.ndarray,
+    model: GalaxyModel,
+) -> np.ndarray:
+    """Vectorized :func:`approximate_disk_potential`."""
+    disk = model.disk
+    s_arr = np.asarray(s, dtype=float)
+    if disk is None or not disk.enabled:
+        return np.zeros_like(s_arr, dtype=float)
+    z_arr = np.asarray(z, dtype=float)
+    r = np.hypot(s_arr, z_arr)
+    f, _, _ = disk_surface_radial_derivatives_batch(r, disk)
+    g, _, _ = disk_vertical_derivatives_batch(z_arr, disk.scale_height)
+    psi = -2.0 * math.pi * f * disk.scale_height * g
+    return np.where(f == 0.0, 0.0, psi)
+
+
+def disk_surface_radial_derivatives_batch(
+    r: np.ndarray,
+    disk: ExponentialDisk,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized :func:`disk_surface_radial_derivatives`."""
+    radii = np.asarray(r, dtype=float)
+    eerfc = np.zeros_like(radii)
+    eexp = np.zeros_like(radii)
+    t = np.sqrt(0.5) * (radii - disk.outer_radius) / disk.trunc_width
+    t2 = t * t
+    low = t < -4.0
+    mid = (t >= -4.0) & (t < 4.0)
+    eerfc[low] = 1.0
+    if np.any(mid):
+        tm = t[mid]
+        t2m = t2[mid]
+        eexp[mid] = np.exp(-t2m) / math.sqrt(2.0 * math.pi) / disk.trunc_width
+        eerfc[mid] = 0.5 * np.vectorize(math.erfc)(tm)
+
+    dc = disk.disk_const
+    rd = disk.scale_length
+    arg1 = -radii / rd
+    if disk.hole_radius == 0.0:
+        sg = dc * np.exp(arg1)
+        sg1 = -dc / rd * np.exp(arg1)
+        sg2 = dc / (rd * rd) * np.exp(arg1)
+    else:
+        tmp2 = np.sqrt(radii * radii + disk.hole_radius**2)
+        arg2 = -tmp2 / disk.core_radius
+        sg = dc * (np.exp(arg1) - np.exp(arg2))
+        sg1 = dc * (-np.exp(arg1) / rd + radii / disk.core_radius / tmp2 * np.exp(arg2))
+        sg2 = dc * (
+            np.exp(arg1) / (rd * rd)
+            + np.exp(arg2)
+            * (disk.core_radius * disk.hole_radius**2 - radii * radii * tmp2)
+            / (disk.core_radius**2 * tmp2**3)
+        )
+
+    f = sg * eerfc
+    f1r = np.zeros_like(radii)
+    f2 = np.zeros_like(radii)
+    positive = radii > 0.0
+    if np.any(positive):
+        rp = radii[positive]
+        fp = f[positive]
+        sg1p = sg1[positive]
+        sg2p = sg2[positive]
+        eerfcp = eerfc[positive]
+        eexpp = eexp[positive]
+        f1r[positive] = (sg1p * eerfcp + eexpp * fp) / rp
+        f2[positive] = (
+            sg2p * eerfcp
+            + 2.0 * sg1p * eexpp
+            + eexpp * ((rp - disk.outer_radius) / disk.trunc_width**2) * fp
+        )
+    return f, f1r, f2
+
+
+def disk_vertical_derivatives_batch(
+    z: np.ndarray,
+    zdisk: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized :func:`disk_vertical_derivatives`."""
+    z_arr = np.asarray(z, dtype=float)
+    zz = z_arr / zdisk
+    g = np.zeros_like(z_arr)
+    g1 = np.zeros_like(z_arr)
+    g2 = np.zeros_like(z_arr)
+    large = np.abs(zz) > 50.0
+    finite = ~large
+    if np.any(large):
+        g[large] = np.abs(zz[large])
+        g1[large] = np.sign(zz[large])
+    if np.any(finite):
+        zzf = zz[finite]
+        cosh_zz = np.cosh(zzf)
+        g[finite] = np.log(cosh_zz)
+        g1[finite] = np.tanh(zzf)
+        g2[finite] = 1.0 / (cosh_zz * cosh_zz)
+    return g, g1, g2
+
+
+def approximate_disk_density_batch(
+    s: np.ndarray,
+    z: np.ndarray,
+    model: GalaxyModel,
+) -> np.ndarray:
+    """Vectorized :func:`approximate_disk_density`."""
+    disk = model.disk
+    s_arr = np.asarray(s, dtype=float)
+    if disk is None or not disk.enabled:
+        return np.zeros_like(s_arr, dtype=float)
+    z_arr = np.asarray(z, dtype=float)
+    r = np.hypot(s_arr, z_arr)
+    f, f1r, f2 = disk_surface_radial_derivatives_batch(r, disk)
+    g, g1, g2 = disk_vertical_derivatives_batch(z_arr, disk.scale_height)
+    h = disk.scale_height
+    return 0.5 * (f2 * h * g + 2.0 * f1r * g * h + 2.0 * f1r * g1 * z_arr + f * g2 / h)
+
+
+def approximate_disk_potential_batch(
+    s: np.ndarray,
+    z: np.ndarray,
+    model: GalaxyModel,
+) -> np.ndarray:
+    """Vectorized :func:`approximate_disk_potential`."""
+    disk = model.disk
+    s_arr = np.asarray(s, dtype=float)
+    if disk is None or not disk.enabled:
+        return np.zeros_like(s_arr, dtype=float)
+    z_arr = np.asarray(z, dtype=float)
+    r = np.hypot(s_arr, z_arr)
+    f, _, _ = disk_surface_radial_derivatives_batch(r, disk)
+    g, _, _ = disk_vertical_derivatives_batch(z_arr, disk.scale_height)
+    psi = -2.0 * math.pi * f * disk.scale_height * g
+    return np.where(f == 0.0, 0.0, psi)
+
+
 def approximate_disk_density(s: float, z: float, model: GalaxyModel) -> float:
     """
     Laplacian of the approximate disk potential (legacy ``appdiskdens``).

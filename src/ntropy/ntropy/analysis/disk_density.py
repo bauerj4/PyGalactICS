@@ -272,3 +272,79 @@ def compare_surface_density(
         rel = abs(measured.sigma[i] - target[i]) / ref
         max_rel = max(max_rel, rel)
     return max_rel
+
+
+def disk_azimuthal_fourier(
+    pos: np.ndarray,
+    mass: np.ndarray,
+    *,
+    m: int = 2,
+    n_bins: int = 15,
+    r_max: float | None = None,
+    z_max: float | None = 0.3,
+    min_count: int = 20,
+) -> dict[str, np.ndarray | float | int]:
+    """
+    Azimuthal Fourier amplitude ``|a_m| / a_0`` in cylindrical rings.
+
+    For an axisymmetric disk, ``m=2`` amplitudes are noise-level
+    (``∝ 1/√N`` per ring).  Elevated ``A2/A0`` indicates bars, spirals,
+    or other non-axisymmetric structure.
+
+    Parameters
+    ----------
+    pos : ndarray, shape (N, 3)
+        Particle positions [kpc].
+    mass : ndarray, shape (N,)
+        Particle masses.
+    m : int
+        Azimuthal mode number (default 2).
+    n_bins : int
+        Number of radial annuli.
+    r_max : float or None
+        Maximum cylindrical radius; auto from data when ``None``.
+    z_max : float or None
+        Include only particles with ``|z| < z_max`` [kpc]; ``None`` uses all z.
+    min_count : int
+        Minimum particles per ring for inclusion in the global mean.
+
+    Returns
+    -------
+    dict
+        ``r_mid``, ``a_m_over_a0`` (per ring), ``counts``,
+        ``a_m_over_a0_median``, ``m``.
+    """
+    r_cyl = np.sqrt(pos[:, 0] ** 2 + pos[:, 1] ** 2)
+    phi = np.arctan2(pos[:, 1], pos[:, 0])
+    if r_max is None:
+        r_max = float(r_cyl.max()) if len(r_cyl) else 1.0
+    if r_max <= 0:
+        r_max = 1.0
+    edges = np.linspace(0.0, r_max, n_bins + 1)
+    r_mid = 0.5 * (edges[:-1] + edges[1:])
+    z_filter = np.ones(len(pos), dtype=bool)
+    if z_max is not None:
+        z_filter = np.abs(pos[:, 2]) < z_max
+    a_m_over_a0 = np.full(n_bins, np.nan, dtype=float)
+    counts = np.zeros(n_bins, dtype=int)
+    for i in range(n_bins):
+        mask = z_filter & (r_cyl >= edges[i]) & (r_cyl < edges[i + 1])
+        counts[i] = int(mask.sum())
+        if counts[i] == 0:
+            continue
+        m_ring = mass[mask]
+        phi_ring = phi[mask]
+        a0 = float(m_ring.sum())
+        if a0 <= 0:
+            continue
+        am = np.abs(np.sum(m_ring * np.exp(1j * m * phi_ring))) / a0
+        a_m_over_a0[i] = float(am)
+    valid = (counts >= min_count) & np.isfinite(a_m_over_a0)
+    median = float(np.median(a_m_over_a0[valid])) if valid.any() else float("nan")
+    return {
+        "m": m,
+        "r_mid": r_mid,
+        "a_m_over_a0": a_m_over_a0,
+        "counts": counts,
+        "a_m_over_a0_median": median,
+    }

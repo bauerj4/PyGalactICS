@@ -23,7 +23,7 @@ from ntropy.integrators.timestep import TimestepConfig
 from ntropy.parallel.mpi import mpi_rank0
 from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
-from ntropy.softening import total_energy
+from ntropy.softening import kinetic_energy, total_energy
 from ntropy.units import code_time_to_gyr, code_time_to_myr
 
 
@@ -39,7 +39,10 @@ class SimulationResult:
     final_state : ParticleState
         State after all steps.
     energies : list of float
-        Total energy after each step (including initial).
+        Total energy after each recorded step (including initial).
+    kinetic_energies : list of float
+        Kinetic energy at the same cadences as ``energies`` (for virial
+        diagnostics: ``W ≈ E - T``, ``2T/|W|``).
     output_dir : Path or None
         Directory where snapshots were written, if any.
     diagnostics : TieredDiagnosticsLog or None
@@ -49,6 +52,7 @@ class SimulationResult:
     initial_state: ParticleState
     final_state: ParticleState
     energies: list[float] = field(default_factory=list)
+    kinetic_energies: list[float] = field(default_factory=list)
     output_dir: Path | None = None
     diagnostics: TieredDiagnosticsLog | None = None
 
@@ -246,9 +250,11 @@ class Simulation:
         state = self.state.copy()
         state.remove_center_of_mass()
         energies: list[float] = []
+        kinetic_energies: list[float] = []
         energies.append(
             total_energy(state.pos, state.vel, state.mass, state.eps)
         )
+        kinetic_energies.append(kinetic_energy(state.vel, state.mass))
 
         output_dir = cfg.resolve_path(cfg.output.dir)
         needs_output_dir = (
@@ -278,6 +284,7 @@ class Simulation:
                 initial_state=initial,
                 final_state=state,
                 energies=energies,
+                kinetic_energies=kinetic_energies,
                 output_dir=output_dir if needs_output_dir else None,
                 diagnostics=diag_log,
             )
@@ -299,21 +306,24 @@ class Simulation:
             )
 
         dt = cfg.integrator.dt
+        energy_every = max(1, int(getattr(cfg.output, "energy_every", 1) or 1))
         for step in step_iter:
             self.state = state
             self.step()
             state = self.state
-            energy = total_energy(state.pos, state.vel, state.mass, state.eps)
-            energies.append(energy)
-            if show_progress and hasattr(step_iter, "set_postfix"):
-                e0 = max(abs(energies[0]), 1e-30)
-                t_code = step * dt
-                step_iter.set_postfix(
-                    t_Gyr=f"{code_time_to_gyr(t_code):.3f}",
-                    t_Myr=f"{code_time_to_myr(t_code):.0f}",
-                    dE=f"{abs(energy - energies[0]) / e0:.2e}",
-                    refresh=False,
-                )
+            if step % energy_every == 0 or step == cfg.integrator.n_steps:
+                energy = total_energy(state.pos, state.vel, state.mass, state.eps)
+                energies.append(energy)
+                kinetic_energies.append(kinetic_energy(state.vel, state.mass))
+                if show_progress and hasattr(step_iter, "set_postfix"):
+                    e0 = max(abs(energies[0]), 1e-30)
+                    t_code = step * dt
+                    step_iter.set_postfix(
+                        t_Gyr=f"{code_time_to_gyr(t_code):.3f}",
+                        t_Myr=f"{code_time_to_myr(t_code):.0f}",
+                        dE=f"{abs(energy - energies[0]) / e0:.2e}",
+                        refresh=False,
+                    )
             if cfg.output.every > 0 and step % cfg.output.every == 0 and mpi_rank0():
                 state.write_ascii(output_dir / f"snapshot_{step:04d}.dat")
 
@@ -324,6 +334,7 @@ class Simulation:
             initial_state=initial,
             final_state=state,
             energies=energies,
+            kinetic_energies=kinetic_energies,
             output_dir=output_dir if cfg.output.write_final or cfg.output.every > 0 else None,
         )
 

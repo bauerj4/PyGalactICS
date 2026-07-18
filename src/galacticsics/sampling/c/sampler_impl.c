@@ -15,6 +15,25 @@ static double erfc_approx(double x) {
     return erfc(x);
 }
 
+/* Invert u = -(1+x)exp(-x) (legacy gendisk invu); PDF ∝ x exp(-x). */
+static double invu(double u) {
+    double rg = 1.0;
+    for (int i = 0; i < 20; i++) {
+        double e = exp(-rg);
+        double f = -(1.0 + rg) * e - u;
+        double df = rg * e;
+        if (df <= 1e-30) {
+            break;
+        }
+        double rnew = rg - f / df;
+        if (fabs(rnew - rg) < 1e-8) {
+            return (rnew > 0.0) ? rnew : 0.0;
+        }
+        rg = rnew;
+    }
+    return (rg > 0.0) ? rg : 0.0;
+}
+
 /* --- RNG (splitmix64-based, per-thread) --- */
 
 void sampler_rng_seed(SamplerRng *rng, int seed, int thread_id) {
@@ -315,6 +334,11 @@ static double diskdf3ez(
     double vc = rc * omega;
     double psir0 = pot_eval(pot, rc, 0.0);
     double ec = -psir0 + 0.5 * vc * vc;
+    /* Legacy diskdf3ez.f: suppress counter-rotating orbits. */
+    if (am < 0.0) {
+        double psi00 = pot_eval(pot, 0.0, 0.0);
+        ec = -2.0 * psi00 - ec;
+    }
     double f_d = corr_f_d(corr, rc);
     double f_sz = corr_f_sz(corr, rc);
     double sr2 = sigma_r2(corr, rc);
@@ -598,9 +622,10 @@ int sample_disk_omp(
             double r_try = 2.0 * rtrunc;
             double z_try = 0.0;
             while (r_try > rtrunc) {
-                double u1 = fmax(sampler_rng_uniform(&rng), 1e-30);
+                /* Legacy gendisk: u1 = -ran; R = rd * invu(u1) ⇒ P(R)∝R exp(-R/rd). */
+                double u1 = -fmax(sampler_rng_uniform(&rng), 1e-30);
                 double v1 = sampler_rng_uniform(&rng) * 2.0 - 1.0;
-                r_try = rd * (-log(u1));
+                r_try = rd * invu(u1);
                 z_try = zd * atanh(fmax(fmin(v1, 0.999), -0.999));
             }
             double rhoguess = exp(-r_try / rd) / pow(cosh(z_try / zd), 2.0);
@@ -645,6 +670,19 @@ int sample_disk_omp(
                 continue;
             }
 
+            /* Cylindrical (vR, vφ, vz) → Cartesian (vx, vy, vz); matches halo path. */
+            double r_cyl_pos = hypot(x, y);
+            double vx, vy;
+            if (r_cyl_pos > 0.0) {
+                double cph = x / r_cyl_pos;
+                double sph = y / r_cyl_pos;
+                vx = vR * cph - vp * sph;
+                vy = vR * sph + vp * cph;
+            } else {
+                vx = vR;
+                vy = vp;
+            }
+
             int idx;
 #pragma omp atomic capture
             idx = accepted++;
@@ -653,8 +691,8 @@ int sample_disk_omp(
                 out[idx * 7 + 1] = x;
                 out[idx * 7 + 2] = y;
                 out[idx * 7 + 3] = z_try;
-                out[idx * 7 + 4] = vR;
-                out[idx * 7 + 5] = vp;
+                out[idx * 7 + 4] = vx;
+                out[idx * 7 + 5] = vy;
                 out[idx * 7 + 6] = vz;
             }
         }

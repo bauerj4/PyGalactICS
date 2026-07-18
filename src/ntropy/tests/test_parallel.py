@@ -126,7 +126,11 @@ def test_mpi_bh_c_matches_python_bh(small_plummer_state):
 
 
 def test_mpi_bh_c_reuses_cached_tree(small_plummer_state):
-    """MPI C Barnes–Hut should honour rebuild=False via MpiForceCache."""
+    """MPI C Barnes–Hut should honour rebuild=False via MpiForceCache.
+
+    Cache reuse applies to the *replicated* tree path; local-tree mode rebuilds
+    every call because domain membership can change when particles move.
+    """
     from ntropy.forces.bhtree_c import extension_available
     from ntropy.parallel.mpi import MpiForceCache, compute_forces_mpi
 
@@ -137,12 +141,12 @@ def test_mpi_bh_c_reuses_cached_tree(small_plummer_state):
     cache = MpiForceCache()
     acc1 = compute_forces_mpi(
         state.pos, state.mass, state.eps, method="bh_c", theta=0.3,
-        cache=cache, rebuild=True,
+        cache=cache, rebuild=True, mpi_local_trees=False,
     )
     tree_id = id(cache.bh_c_tree)
     acc2 = compute_forces_mpi(
         state.pos, state.mass, state.eps, method="bh_c", theta=0.3,
-        cache=cache, rebuild=False,
+        cache=cache, rebuild=False, mpi_local_trees=False,
     )
     assert cache.bh_c_tree is not None
     assert id(cache.bh_c_tree) == tree_id

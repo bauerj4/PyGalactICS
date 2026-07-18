@@ -644,7 +644,7 @@ static PyObject *PyBHTree_pack_buffers(PyBHTreeObject *self, PyObject *Py_UNUSED
     }
 
     return Py_BuildValue(
-        "{s:O,s:O,s:O,s:O,s:O,s:O,s:O,s:i}",
+        "{s:N,s:N,s:N,s:N,s:O,s:O,s:O,s:i}",
         "nodes",
         nodes_arr,
         "nodes_native",

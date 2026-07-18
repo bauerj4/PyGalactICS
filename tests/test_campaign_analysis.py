@@ -7,15 +7,25 @@ import pytest
 
 from galacticsics.campaign.analysis import (
     HALO_PROFILE_MIN_COUNT,
+    HALO_PROFILE_PLOT_MIN_COUNT,
     add_density_colorbar,
+    component_radial_stats,
+    conserved_quantity_drift,
     density_map_color_limits,
     density_map_log10,
+    disk_axisymmetry_diagnostic,
+    evolution_checkpoint_times,
     halo_profile_bin_edges,
+    halo_profile_min_count,
     halo_projections,
     halo_spherical_profile,
+    load_evolution_checkpoints,
     plot_density_map,
     plot_halo_spherical_profile,
     profile_plot_series,
+    projection_colorbar_label,
+    state_virial_summary,
+    summarize_evolution_health,
 )
 from ntropy.analysis.disk_density import bin_plane_density
 from ntropy.particles import ParticleState
@@ -81,6 +91,46 @@ def test_halo_projections_halo_component_only():
     assert edge.density.shape == (8, 8)
 
 
+def test_halo_profile_min_count_plot_vs_drift():
+    assert halo_profile_min_count(50_000, purpose="drift") == HALO_PROFILE_MIN_COUNT
+    plot_mc = halo_profile_min_count(50_000, purpose="plot")
+    assert HALO_PROFILE_PLOT_MIN_COUNT <= plot_mc <= HALO_PROFILE_MIN_COUNT
+
+
+def test_component_radial_stats_and_health_summary():
+    state_i = _state_with_tags(n=200)
+    state_f = _state_with_tags(n=200)
+    stats = component_radial_stats(state_i, "halo")
+    assert stats["n"] == 200.0
+    assert stats["r_max"] > stats["r_min"]
+    drift = conserved_quantity_drift(state_i, state_f)
+    assert "dE_over_E0" in drift
+    virial = state_virial_summary(state_i)
+    assert "virial_ratio" in virial
+    health = summarize_evolution_health(state_i, state_f)
+    assert health["halo_rho_drift"] >= 0.0
+    assert "virial_ic_virial_ratio" in health
+    assert "disk_m2_a0_median_ic" in health
+
+
+def test_disk_axisymmetry_on_uniform_ring():
+    n = 400
+    phi = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    pos = np.column_stack([8.0 * np.cos(phi), 8.0 * np.sin(phi), np.zeros(n)])
+    mass = np.full(n, 1.0 / n)
+    eps = np.full(n, 0.1)
+    tags = np.array(["disk"] * n)
+    state = ParticleState.from_arrays(pos, np.zeros((n, 3)), mass, eps, tags=tags)
+    ax = disk_axisymmetry_diagnostic(state, min_count=30)
+    assert ax["n_disk"] == n
+    assert ax["a_m_over_a0_median"] < 0.1
+
+
+def test_projection_colorbar_label_is_surface_density():
+    assert projection_colorbar_label("halo") == "log₁₀ Σ"
+    assert projection_colorbar_label("disk") == "log₁₀ Σ"
+
+
 def test_plot_halo_spherical_profile_runs():
     import matplotlib.pyplot as plt
 
@@ -106,6 +156,37 @@ def test_density_map_color_limits_ignores_empty_bins():
     vmin, vmax = density_map_color_limits(map_a)
     assert vmax > vmin
     assert vmin > -20.0
+
+
+def test_evolution_checkpoint_times_includes_end():
+    times = evolution_checkpoint_times([0.0, 0.05, 0.1], end_time_gyr=0.5)
+    assert times[0] == pytest.approx(0.0)
+    assert times[-1] == pytest.approx(0.5)
+    assert 0.05 in times and 0.1 in times
+
+
+def test_load_evolution_checkpoints_ic_and_final(tmp_path):
+    state_i = _state_with_tags(n=80, component="disk")
+    state_f = _state_with_tags(n=80, component="disk")
+    state_f.pos[:, 0] += 0.5
+    evo = tmp_path / "evolution"
+    evo.mkdir(parents=True)
+    np.savez(
+        tmp_path / "ic_state.npz",
+        pos=state_i.pos,
+        vel=state_i.vel,
+        mass=state_i.mass,
+        eps=state_i.eps,
+        tags=state_i.tags,
+    )
+    state_f.write_ascii(evo / "final.dat")
+    checkpoints = load_evolution_checkpoints(
+        tmp_path, [0.0, 0.5], template=state_i, end_time_gyr=0.5
+    )
+    assert len(checkpoints) == 2
+    assert checkpoints[0][0] == pytest.approx(0.0)
+    assert checkpoints[1][0] == pytest.approx(0.5)
+    assert checkpoints[1][1].pos[0, 0] == pytest.approx(state_f.pos[0, 0])
 
 
 def test_density_map_shared_limits_across_maps():

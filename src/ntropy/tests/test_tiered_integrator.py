@@ -21,7 +21,7 @@ def test_tiered_leapfrog_short_run():
     )
     state.type_id = np.ones(state.n, dtype=np.int32)
 
-    def accel(pos: np.ndarray) -> np.ndarray:
+    def accel(pos: np.ndarray, active_idx: np.ndarray | None = None) -> np.ndarray:
         from ntropy.forces.brute import compute_forces_brute
         return compute_forces_brute(pos, state.mass, state.eps)
 
@@ -55,7 +55,7 @@ def test_tiered_bins_differ_for_different_accel():
     state.eps[:half] = 0.05
     state.eps[half:] = 0.01
 
-    def accel(pos: np.ndarray) -> np.ndarray:
+    def accel(pos: np.ndarray, active_idx: np.ndarray | None = None) -> np.ndarray:
         from ntropy.forces.brute import compute_forces_brute
         return compute_forces_brute(pos, state.mass, state.eps)
 

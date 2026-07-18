@@ -135,9 +135,9 @@ def potential_at_batch(
         psi[zero] = arrays.apot[0, 0] / math.sqrt(4.0 * math.pi)
 
     if arrays.flags.disk and model.disk and model.disk.enabled:
-        idx = np.where(pos)[0]
-        for i in idx:
-            psi[i] += approximate_disk_potential_from_model(model, float(s[i]), float(z[i]))
+        from galacticsics.potential.poisson.appdisk import approximate_disk_potential_batch
+
+        psi[pos] += approximate_disk_potential_batch(sp, zp, model)
     return psi
 
 

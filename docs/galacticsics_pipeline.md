@@ -321,6 +321,14 @@ $(R, z, v_R, v_z, v_\phi)$:
 3. Evaluate `diskdf5ez` with spline-interpolated $f_d$, $f_{sz}$.
 4. Accept/reject velocities against the local DF maximum (`FindMax1` in `gendisk.c`).
 
+**DF validation** (`galacticsics.diagnostics.df_validation`): after sampling,
+`validate_ic_distribution_functions(state, model, work_dir)` compares halo
+binding energies to `dfnfw.dat`, disk `Σ(R)` and `diskdf5ez` positivity with
+`cordbh.dat` corrections, bulge energies to `dfsersic.dat`, and reports an
+`m=2` axisymmetry metric (`A2/A0`) on the disk. Wired into
+`summarize_evolution_health(..., work_dir=...)` and
+`campaign_density_walkthrough.ipynb` §1b.
+
 ---
 
 ## Epicyclic frequencies (`getfreqs`)
@@ -428,6 +436,59 @@ from ntropy.simulation import Simulation
 
 This answers whether $\rho(r)$, $\Sigma(R)$, and $|\Delta E/E_0|$ remain
 reasonable over a few Gyr — not full cosmological evolution.
+
+### Spiral and bar formation (Bauer & Widrow 2018)
+
+GalactICS initial conditions are **axisymmetric equilibria** at $t=0$:
+
+1. **Poisson solve (`dbh`)** — even-$l$ multipoles about the rotation axis.
+2. **Distribution function (`diskdf`)** — epicycle DF in $E$, $L_z$, $E_z$;
+   azimuth is uniform at sampling (shot noise only).
+3. **Finite $N$** — Poisson fluctuations in particle positions and velocities
+   provide a stochastic seed for non-axisymmetric modes.
+
+Collisionless disks seeded this way can develop **spiral arms and bars over
+multi-Gyr evolution** via swing amplification of shot noise, without an
+external companion or imposed $m=2$ perturbation.  [Bauer & Widrow
+(2018)](https://arxiv.org/abs/1809.00090) use GalactICS ICs (model A.I in
+Table 1: $Q \approx 2.34$, $z_d/R_d = 0.1$, $\varepsilon = 0.15$ kpc) and
+evolve to 5–10 Gyr; their Figure 5 shows face-on structure growing from an
+initially smooth disk, and Figure 4 tracks the $m=2$ Fourier amplitude $A_2$.
+
+**Walkthrough vs paper.** The default campaign notebook
+(`campaign_density_walkthrough.ipynb`, `mw_walkthrough.json`) is a **short
+stability screen**, not a morphology run:
+
+| Setting | Walkthrough default | Bauer & Widrow (2018) |
+|---------|--------------------|-----------------------|
+| `end_time_gyr` | 0.5 | 5–10 |
+| `toomre_q_target` | 1.5 | $\sim 2.34$ |
+| `softening.disk` | 0.1 kpc | 0.15 kpc |
+| `max_timestep_bin` | 7 (coarse halo steps) | tighter (e.g. $\leq 5$) |
+| Typical $\|ΔE/E_0\|$ | $\gtrsim 0.2$ (numerical heating) | low drift required |
+
+At 0.5 Gyr with coarse timesteps and strong energy drift, face-on maps often
+stay nearly axisymmetric and heated — that does **not** mean GalactICS disks
+cannot form spirals.  For morphology studies use longer evolution, tighter
+timesteps, $\varepsilon \sim 0.15$ kpc, and $Q$ near the paper value; see
+`campaigns/bauer_morphology.json`.
+
+**Diagnostic:** `disk_azimuthal_fourier` / `disk_axisymmetry_diagnostic`
+compute $A_m/A_0$ in cylindrical rings (paper Figure 4 uses $m=2$).  At $t=0$,
+$A_2/A_0 \sim 1/\sqrt{N_\mathrm{ring}}$ (shot noise).  Growth above that
+floor over Gyr signals bars or spirals.  Wired in `campaign/analysis.py`,
+`summarize_evolution_health`, and notebook §1b.
+
+### Virial equilibrium at $t=0$
+
+GalactICS samples velocities from the equilibrium DF, so the merged IC state
+should satisfy the virial theorem $2T + W \approx 0$ (equivalently
+$T/|W| \approx 0.5$).  `virial_diagnostic` in `ntropy.softening` reports
+`virial_ratio` $= 2T/|W|$ and flags `is_virial_equilibrium` when
+$|2T+W|/|W|$ is below a tolerance.  For $N > 16\,384$ the potential term
+uses a random subset to avoid $O(N^2)$ cost.  Campaign
+`summarize_evolution_health` includes `virial_ic_*` and `virial_final_*`
+fields for both snapshots.
 
 ---
 

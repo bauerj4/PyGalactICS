@@ -169,6 +169,84 @@ def kinetic_energy(vel: np.ndarray, mass: np.ndarray) -> float:
     return float(0.5 * np.sum(mass * np.sum(vel * vel, axis=1)))
 
 
+def virial_diagnostic(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    mass: np.ndarray,
+    eps: np.ndarray,
+    *,
+    rtol: float = 0.3,
+    max_particles: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> dict[str, float | bool | int]:
+    """
+    Virial-theorem check for a self-gravitating N-body state.
+
+    For equilibrium, ``2T + W ≈ 0`` (equivalently ``T/|W| ≈ 0.5`` or
+    ``2T/|W| ≈ 1``).  Uses the same Plummer-softened pairwise potential as
+    :func:`softened_potential_energy`.
+
+    When ``N`` exceeds ``max_particles`` (default
+    :data:`LARGE_N_ENERGY_THRESHOLD`), a random subset is used for the
+    potential term so the check stays O(N_sub²).
+
+    Parameters
+    ----------
+    pos, vel, mass, eps
+        Particle state arrays.
+    rtol
+        Relative tolerance on ``|2T + W| / |W|`` for the equilibrium flag.
+    max_particles
+        Cap on particles used for the potential sum; ``None`` uses
+        :data:`LARGE_N_ENERGY_THRESHOLD`.
+    rng
+        Random generator for subsampling (default: unseeded).
+
+    Returns
+    -------
+    dict
+        ``kinetic_energy``, ``potential_energy``, ``virial_sum`` (2T+W),
+        ``virial_ratio`` (2T/|W|), ``ke_over_abs_pe`` (T/|W|),
+        ``virial_residual_rel`` (|2T+W|/|W|), ``is_virial_equilibrium``,
+        ``n_particles``, ``n_used``, ``subsampled``.
+    """
+    n = len(mass)
+    cap = LARGE_N_ENERGY_THRESHOLD if max_particles is None else max_particles
+    subsampled = n > cap
+    if subsampled:
+        # T and W must use the same particles.  Prefer mass-weighted sampling so a
+        # disk+halo mix (many light disk particles) still represents the mass that
+        # dominates the potential; uniform particle picks understate |W|.
+        rng = rng or np.random.default_rng()
+        u = np.clip(rng.random(n), 1e-300, 1.0)
+        keys = u ** (1.0 / np.maximum(mass.astype(float), 1e-300))
+        idx = np.argpartition(keys, -cap)[-cap:]
+        ke = kinetic_energy(vel[idx], mass[idx])
+        pe = softened_potential_energy(pos[idx], mass[idx], eps[idx])
+        n_used = cap
+    else:
+        ke = kinetic_energy(vel, mass)
+        pe = softened_potential_energy(pos, mass, eps)
+        n_used = n
+    abs_pe = abs(pe)
+    virial_sum = 2.0 * ke + pe
+    virial_ratio = (2.0 * ke / abs_pe) if abs_pe > 0 else 0.0
+    ke_over_abs_pe = (ke / abs_pe) if abs_pe > 0 else 0.0
+    residual_rel = abs(virial_sum) / max(abs_pe, 1e-30)
+    return {
+        "kinetic_energy": ke,
+        "potential_energy": pe,
+        "virial_sum": virial_sum,
+        "virial_ratio": virial_ratio,
+        "ke_over_abs_pe": ke_over_abs_pe,
+        "virial_residual_rel": residual_rel,
+        "is_virial_equilibrium": residual_rel <= rtol,
+        "n_particles": n,
+        "n_used": n_used,
+        "subsampled": subsampled,
+    }
+
+
 def total_energy(
     pos: np.ndarray,
     vel: np.ndarray,

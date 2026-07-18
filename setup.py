@@ -16,6 +16,16 @@ setup(
             extra_compile_args=["-O3", "-std=c11", "-fopenmp"],
             extra_link_args=["-fopenmp"],
         ),
+        Extension(
+            "galacticsics.potential.poisson._poisson_c",
+            sources=[
+                "src/galacticsics/potential/poisson/c/poisson_impl.c",
+                "src/galacticsics/potential/poisson/c/poisson_module.c",
+            ],
+            include_dirs=[np.get_include(), "src/galacticsics/potential/poisson/c"],
+            extra_compile_args=["-O3", "-std=c11", "-fopenmp"],
+            extra_link_args=["-fopenmp"],
+        ),
     ],
     package_dir={"": "src"},
 )

@@ -241,6 +241,7 @@ def sample_galacticsics_halo(
     require_galacticsics()
     import tempfile
 
+    from galacticsics.physics.backend import PhysicsBackendKind
     from galacticsics.potential.solver import solve_potential
     from galacticsics.sampling.sampler import SampleConfig, sample_galaxy
 
@@ -255,7 +256,13 @@ def sample_galacticsics_halo(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     if solve:
-        solve_potential(model, work_dir=work_dir, cleanup=False, timeout=timeout)
+        solve_potential(
+            model,
+            work_dir=work_dir,
+            cleanup=False,
+            timeout=timeout,
+            backend=PhysicsBackendKind.PYTHON,
+        )
 
     config = SampleConfig(
         n_disk=0,
@@ -264,12 +271,14 @@ def sample_galacticsics_halo(
         seed_halo=seed,
         run_diskdf=False,
         center=True,
+        use_openmp=True,
     )
     sample_result = sample_galaxy(
         model,
         config,
         work_dir=work_dir,
         cleanup=False,
+        backend=PhysicsBackendKind.PYTHON,
     )
     if "halo" not in sample_result.particles:
         raise RuntimeError("genhalo did not produce halo particles")
@@ -333,6 +342,7 @@ def sample_galacticsics_galaxy(
     require_galacticsics()
     import tempfile
 
+    from galacticsics.physics.backend import PhysicsBackendKind
     from galacticsics.potential.solver import solve_potential
     from galacticsics.sampling.sampler import sample_galaxy
 
@@ -347,7 +357,13 @@ def sample_galacticsics_galaxy(
 
     artifact_path = Path(artifact_dir) if artifact_dir is not None else None
     if artifact_path is None and solve:
-        solve_potential(model, work_dir=work_dir, cleanup=False, timeout=timeout)
+        solve_potential(
+            model,
+            work_dir=work_dir,
+            cleanup=False,
+            timeout=timeout,
+            backend=PhysicsBackendKind.PYTHON,
+        )
 
     sample_result = sample_galaxy(
         model,
@@ -355,6 +371,7 @@ def sample_galacticsics_galaxy(
         work_dir=work_dir,
         artifact_dir=artifact_path,
         cleanup=False,
+        backend=PhysicsBackendKind.PYTHON,
     )
     if not sample_result.particles:
         raise RuntimeError("No particles were sampled")

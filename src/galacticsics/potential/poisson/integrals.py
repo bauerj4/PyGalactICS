@@ -9,7 +9,7 @@ import numpy as np
 from scipy import integrate
 from scipy.special import eval_legendre
 
-from galacticsics.numerics import quadrature_node_count, simpson_on_grid
+from galacticsics.numerics import quadrature_node_count, simpson_on_grid, simpson_uniform
 
 
 def _simpson_quadrature_nodes(ntheta: int) -> tuple[np.ndarray, np.ndarray]:
@@ -40,7 +40,99 @@ def _integrate_polar_legendre(
     """Quadrature of rho(cos theta) * Y_l(cos theta) over a polar quadrant."""
     pl = eval_legendre(ell, ctheta)
     plcon = math.sqrt((2 * ell + 1) / (4.0 * math.pi))
-    return float(plcon * simpson_on_grid(rho * pl, ctheta) * 4.0 * math.pi)
+    if ctheta.size >= 3 and np.allclose(np.diff(ctheta), ctheta[1] - ctheta[0]):
+        dx = float(ctheta[1] - ctheta[0])
+        moment = plcon * simpson_uniform(rho * pl, dx)
+    else:
+        moment = plcon * simpson_on_grid(rho * pl, ctheta)
+    return float(moment * 4.0 * math.pi)
+
+
+def _polar_shell_coordinates(r: float, ntheta: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return cos(theta) nodes and cylindrical (s, z) samples on a shell."""
+    ctheta = _polar_cos_nodes(ntheta)
+    z = r * ctheta
+    s = r * np.sqrt(np.maximum(0.0, 1.0 - ctheta * ctheta))
+    return ctheta, s, z
+
+
+def _rho_on_polar_shell(
+    arrays,
+    model,
+    r: float,
+    ntheta: int,
+    *,
+    dens_psi_halo,
+    dens_psi_bulge=None,
+    psic: float,
+    halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None,
+    bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate total harmonic density on polar nodes for one cylindrical shell."""
+    from galacticsics.potential.poisson.densities import total_density_harmonic_batch
+    from galacticsics.potential.poisson.potential import potential_at_batch
+
+    ctheta, s, z = _polar_shell_coordinates(r, ntheta)
+    zd = model.disk.scale_height if model.disk else 1.0
+    n = s.size
+    s_batch = np.concatenate([s, s, s])
+    z_batch = np.concatenate([z, np.zeros(n), np.full(n, 3.0 * zd)])
+    psi_all = potential_at_batch(arrays, model, s_batch, z_batch)
+    psi = psi_all[:n]
+    psi_mid = psi_all[n : 2 * n]
+    psi_3zd = psi_all[2 * n :]
+    rho = total_density_harmonic_batch(
+        s,
+        z,
+        psi,
+        psi_mid,
+        psi_3zd,
+        model,
+        dens_psi_halo=dens_psi_halo,
+        dens_psi_bulge=dens_psi_bulge,
+        psic=psic,
+        halo_psi_tables=halo_psi_tables,
+        bulge_psi_tables=bulge_psi_tables,
+    )
+    return ctheta, rho
+
+
+def integrate_polar_harmonics_at_shell(
+    arrays,
+    model,
+    r: float,
+    ells: list[int],
+    ntheta: int,
+    *,
+    dens_psi_halo,
+    dens_psi_bulge=None,
+    psic: float,
+    halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None = None,
+    bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None = None,
+) -> dict[int, float]:
+    """
+    Synthesize all requested density harmonics at one shell radius.
+
+    Density is evaluated once per shell; each even harmonic multiplies by
+  ``Y_l(cos theta)`` before Simpson quadrature.
+    """
+    if r <= 0.0 or not ells:
+        return {ell: 0.0 for ell in ells}
+    ctheta, rho = _rho_on_polar_shell(
+        arrays,
+        model,
+        r,
+        ntheta,
+        dens_psi_halo=dens_psi_halo,
+        dens_psi_bulge=dens_psi_bulge,
+        psic=psic,
+        halo_psi_tables=halo_psi_tables,
+        bulge_psi_tables=bulge_psi_tables,
+    )
+    moments: dict[int, float] = {}
+    for ell in ells:
+        moments[ell] = _integrate_polar_legendre(r, ell, ctheta, rho)
+    return moments
 
 
 def _pad_to_even_shells(values: np.ndarray) -> tuple[np.ndarray, int]:
@@ -99,32 +191,21 @@ def integrate_polar_density_at_shell(
     harmonic_moment : float
         Harmonic density moment :math:`\\int \\rho Y_\\ell \\, d\\Omega`.
     """
-    from galacticsics.potential.poisson.densities import total_density_harmonic_batch
-    from galacticsics.potential.poisson.potential import potential_at_batch
-
     if r <= 0.0:
         return 0.0
-    ctheta = _polar_cos_nodes(ntheta)
-    z = r * ctheta
-    s = r * np.sqrt(np.maximum(0.0, 1.0 - ctheta * ctheta))
-    zd = model.disk.scale_height if model.disk else 1.0
-    psi = potential_at_batch(arrays, model, s, z)
-    psi_mid = potential_at_batch(arrays, model, s, np.zeros_like(s))
-    psi_3zd = potential_at_batch(arrays, model, s, np.full_like(s, 3.0 * zd))
-    rho = total_density_harmonic_batch(
-        s,
-        z,
-        psi,
-        psi_mid,
-        psi_3zd,
+    ells = [ell]
+    return integrate_polar_harmonics_at_shell(
+        arrays,
         model,
+        r,
+        ells,
+        ntheta,
         dens_psi_halo=dens_psi_halo,
         dens_psi_bulge=dens_psi_bulge,
         psic=psic,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
-    )
-    return _integrate_polar_legendre(r, ell, ctheta, rho)
+    )[ell]
 
 
 def integrate_polar_density(

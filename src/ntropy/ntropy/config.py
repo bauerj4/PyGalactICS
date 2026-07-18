@@ -194,6 +194,8 @@ class ForceConfig:
     rebuild_every: int = 1
     active_subset: bool = True
     bh_optimizations: BhOptimizationsConfig = field(default_factory=BhOptimizationsConfig)
+    # Gadget-style local octrees + LET exchange under MPI (vs full replicated tree).
+    mpi_local_trees: bool = True
 
 
 IntegratorType = Literal[
@@ -227,6 +229,9 @@ class OutputConfig:
     diagnostics_every: int = 1
     particle_dump_every: int = 0
     write_particle_bins: bool = True
+    # Record total energy every N steps (1 = every step).  Larger strides cut
+    # the O(N²) softened-potential cost and shrink the energies list for long runs.
+    energy_every: int = 1
 
 
 @dataclass
@@ -441,6 +446,7 @@ def load_config(path: PathLike) -> RunConfig:
             bh_optimizations=BhOptimizationsConfig.from_dict(
                 force_raw.get("bh_optimizations")
             ),
+            mpi_local_trees=bool(force_raw.get("mpi_local_trees", True)),
         ),
         integrator=IntegratorConfig(
             type=integ_type,  # type: ignore[arg-type]
@@ -469,6 +475,7 @@ def load_config(path: PathLike) -> RunConfig:
             diagnostics_every=max(0, int(out_raw.get("diagnostics_every", 1))),
             particle_dump_every=max(0, int(out_raw.get("particle_dump_every", 0))),
             write_particle_bins=bool(out_raw.get("write_particle_bins", True)),
+            energy_every=max(1, int(out_raw.get("energy_every", 1))),
         ),
         analysis=AnalysisConfig(
             density_bins=max(1, int(ana_raw.get("density_bins", 20))),

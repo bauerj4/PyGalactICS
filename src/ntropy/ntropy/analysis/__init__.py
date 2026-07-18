@@ -10,6 +10,7 @@ from ntropy.analysis.disk_density import (
     SurfaceDensityProfile,
     bin_midplane_surface_density,
     compare_surface_density,
+    disk_azimuthal_fourier,
     target_surface_density,
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "bin_midplane_surface_density",
     "compare_density_profiles",
     "compare_surface_density",
+    "disk_azimuthal_fourier",
     "target_surface_density",
     "theoretical_profile_from_model",
 ]

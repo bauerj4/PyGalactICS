@@ -618,8 +618,9 @@ def total_density_harmonic_batch(
         rho += disk_density_psi_batch(
             s_arr, z_arr, psi_arr, psi_mid_arr, psi_3zd_arr, model
         )
-        for idx in range(s_arr.size):
-            rho[idx] -= approximate_disk_density(float(s_arr[idx]), float(z_arr[idx]), model)
+        from galacticsics.potential.poisson.appdisk import approximate_disk_density_batch
+
+        rho -= approximate_disk_density_batch(s_arr, z_arr, model)
     return np.maximum(rho, 0.0)
 
 

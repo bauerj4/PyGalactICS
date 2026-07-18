@@ -66,6 +66,33 @@ def simpson_integrate(func, a: float, b: float, n: int = 128) -> float:
     return float(integrate.simpson(y, x=x))
 
 
+def simpson_uniform(y: np.ndarray, dx: float) -> float:
+    """
+    Composite Simpson rule on a uniformly spaced 1-D grid.
+
+    Parameters
+    ----------
+    y : ndarray
+        Samples with odd length ``>= 3``.
+    dx : float
+        Uniform spacing between nodes.
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    if n < 3 or n % 2 == 0:
+        raise ValueError("simpson_uniform requires an odd sample count >= 3")
+    return float(
+        dx
+        / 3.0
+        * (
+            y[0]
+            + y[-1]
+            + 4.0 * np.sum(y[1:-1:2])
+            + 2.0 * np.sum(y[2:-1:2])
+        )
+    )
+
+
 def simpson_on_grid(y: np.ndarray, x: np.ndarray) -> float:
     """
     Simpson integration on a tabulated curve.

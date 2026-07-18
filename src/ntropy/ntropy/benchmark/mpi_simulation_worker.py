@@ -15,6 +15,23 @@ from ntropy.simulation import Simulation
 
 
 def _load_config(raw: dict) -> RunConfig:
+    """
+    Build a :class:`RunConfig` from the notebook's energy-run JSON dict.
+
+    Honours ``force.mpi_local_trees`` (default True) so notebook energy
+    runs exercise the same Gadget-style LET path as campaign evolves.
+
+    Parameters
+    ----------
+    raw : dict
+        Parsed JSON with ``integrator``, ``force``, and ``parallel`` blocks
+        (see ``_energy_config_dict`` in the NFW walkthrough notebook).
+
+    Returns
+    -------
+    cfg : RunConfig
+        Config with output writing disabled (energies only).
+    """
     cfg = RunConfig()
     integ = raw["integrator"]
     cfg.integrator = IntegratorConfig(
@@ -27,18 +44,34 @@ def _load_config(raw: dict) -> RunConfig:
     cfg.force = ForceConfig(
         method=force.get("method", "bh"),
         theta=float(force.get("theta", 0.5)),
+        mpi_local_trees=bool(force.get("mpi_local_trees", True)),
     )
     par = raw.get("parallel", {})
     cfg.parallel = ParallelConfig(
         enabled=bool(par.get("enabled", True)),
         n_workers=int(par.get("n_workers", 1)),
     )
+    out = raw.get("output", {})
     cfg.output.write_final = False
     cfg.output.every = 0
+    cfg.output.energy_every = max(1, int(out.get("energy_every", 1)))
     return cfg
 
 
 def _load_state_npz(path: Path) -> ParticleState:
+    """
+    Load a :class:`ParticleState` from a campaign ``ic_state.npz`` dump.
+
+    Parameters
+    ----------
+    path : Path
+        Archive with ``pos``/``vel``/``mass``/``eps`` and optional
+        ``type_id``/``timestep_bin``/``tags`` arrays.
+
+    Returns
+    -------
+    state : ParticleState
+    """
     with np.load(path, allow_pickle=True) as data:
         state = ParticleState.from_arrays(
             data["pos"],
@@ -54,6 +87,26 @@ def _load_state_npz(path: Path) -> ParticleState:
 
 
 def _run_campaign_dir(work_dir: Path, *, label: str) -> int:
+    """
+    Run a campaign tiered evolve from a prepared work directory.
+
+    Reads ``ntropy_config.json`` and ``ic_state.npz`` from ``work_dir``,
+    runs the simulation under MPI, and writes ``evolve_result.json``
+    (rank 0). Errors are dumped to ``evolve_error.log`` before aborting
+    all ranks.
+
+    Parameters
+    ----------
+    work_dir : Path
+        Campaign model directory prepared by the galacticsics runner.
+    label : str
+        Progress-bar label shown on rank 0.
+
+    Returns
+    -------
+    exit_code : int
+        ``0`` on success; ``comm.Abort(1)`` on failure.
+    """
     from mpi4py import MPI
 
     comm = MPI.COMM_WORLD
@@ -165,6 +218,7 @@ def main(argv: list[str]) -> int:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "energies": result.energies,
+                "kinetic_energies": result.kinetic_energies,
                 "dt": cfg.integrator.dt,
                 "n_steps": cfg.integrator.n_steps,
                 "integrator_type": cfg.integrator.type,
@@ -184,14 +238,10 @@ def main(argv: list[str]) -> int:
         comm.Barrier()
         return 0
     except Exception:
-        err_path = work_dir / "evolve_error.log"
+        err_path = out_path.parent / "evolve_error.log"
         if rank == 0:
             tb = traceback.format_exc()
             err_path.write_text(tb)
             print(tb, file=sys.stderr)
         comm.Abort(1)
         return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))

@@ -15,10 +15,16 @@ from ntropy.particle_types import ParticleTypeSpec, TypeRegistry
 
 
 def test_ideal_timestep_scales_with_softening():
-    acc = np.array([[0.0, 1.0, 0.0], [0.0, 4.0, 0.0]])
+    # Same |a|, larger softening → larger ideal Δt (GADGET √(ε/|a|)).
+    acc = np.array([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
     eps = np.array([0.01, 0.04])
     dt = ideal_timestep(acc, eps, eta=0.025)
     assert dt[1] > dt[0]
+    # Same ε, stronger |a| → smaller ideal Δt.
+    acc2 = np.array([[0.0, 1.0, 0.0], [0.0, 4.0, 0.0]])
+    eps2 = np.array([0.01, 0.01])
+    dt2 = ideal_timestep(acc2, eps2, eta=0.025)
+    assert dt2[1] < dt2[0]
 
 
 def test_bin_from_timestep_power_of_two():
@@ -46,9 +52,11 @@ def test_update_timestep_bins_damping():
 
 
 def test_active_mask_respects_bins():
+    # bins → factors 2**b = [1, 2, 4]; active when step % factor == 0
     bins = np.array([0, 1, 2], dtype=np.int32)
-    assert active_mask_for_step(2, bins).tolist() == [True, True, True]
     assert active_mask_for_step(1, bins).tolist() == [True, False, False]
+    assert active_mask_for_step(2, bins).tolist() == [True, True, False]
+    assert active_mask_for_step(4, bins).tolist() == [True, True, True]
 
 
 def test_type_max_bin_clamp():

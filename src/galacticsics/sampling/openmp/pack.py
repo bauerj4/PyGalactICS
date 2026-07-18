@@ -99,6 +99,11 @@ def pack_halo_context(work_dir: Path) -> dict:
         log_df.append(float(ld))
     energies_arr = np.asarray(energies, dtype=np.float64)
     log_df_arr = np.asarray(log_df, dtype=np.float64)
+    # dfnfw.dat energies are descending; the C sampler's interp1d (and scipy
+    # with assume_sorted=True) require ascending abscissas.
+    order = np.argsort(energies_arr)
+    energies_arr = np.ascontiguousarray(energies_arr[order])
+    log_df_arr = np.ascontiguousarray(log_df_arr[order])
     log_interp = interp1d(
         energies_arr,
         log_df_arr,
@@ -107,7 +112,8 @@ def pack_halo_context(work_dir: Path) -> dict:
         fill_value=(float(log_df_arr[0]), float(log_df_arr[-1])),
         assume_sorted=True,
     )
-    fcut = float(np.exp(log_interp(pot.psic))) if pot.psic > energies_arr[0] else 0.0
+    # Lowered-DF cutoff at the truncation potential (legacy genhalo convention).
+    fcut = float(np.exp(log_interp(pot.psic)))
 
     from galacticsics.potential.poisson.densities import halo_density_spherical
 

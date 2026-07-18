@@ -182,6 +182,11 @@ def _diskdf3ez(
         return 0.0
     vc = rc * omega
     ec = -evaluate_potential(pot, rc, 0.0) + 0.5 * vc * vc
+    # Legacy diskdf3ez.f: flip binding energy for counter-rotating orbits so the
+    # epicycle DF strongly suppresses am < 0 (otherwise f is even in Lz).
+    if am < 0.0:
+        psi00 = evaluate_potential(pot, 0.0, 0.0)
+        ec = -2.0 * psi00 - ec
     f_d = float(spline_d(rc))
     f_sz = float(spline_sz(rc))
     sr2 = _sigma_r2_base(rc, pot.model) * max(f_d, 1e-6)
@@ -273,6 +278,10 @@ def _diskdf3intez(
         return 0.0
     vc = rc * omega
     ec = -evaluate_potential(pot, rc, 0.0) + 0.5 * vc * vc
+    # Legacy diskdf3intez.f: same counter-rotating energy flip as diskdf3ez.
+    if am < 0.0:
+        psi00 = evaluate_potential(pot, 0.0, 0.0)
+        ec = -2.0 * psi00 - ec
     f_d = float(spline_d(rc))
     f_sz = float(spline_sz(rc))
     sr2 = _sigma_r2_base(rc, pot.model) * max(f_d, 1e-6)

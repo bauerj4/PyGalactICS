@@ -77,6 +77,8 @@ def bin_spherical_density(
     volumes = (4.0 / 3.0) * np.pi * (edges[1:] ** 3 - edges[:-1] ** 3)
     volumes = np.maximum(volumes, 1e-30)
     rho = shell_mass / volumes
+    # Empty shells → NaN so log-space plots do not draw vertical "pops" to zero.
+    rho = np.where(counts > 0, rho, np.nan)
     r_mid = 0.5 * (edges[:-1] + edges[1:])
     return DensityProfile(r_mid=r_mid, rho=rho, counts=counts)
 
@@ -105,6 +107,8 @@ def compare_density_profiles(
     max_rel = 0.0
     for i in range(min(len(initial.rho), len(final.rho))):
         if initial.counts[i] < min_count or final.counts[i] < min_count:
+            continue
+        if not np.isfinite(initial.rho[i]) or not np.isfinite(final.rho[i]):
             continue
         ref = max(initial.rho[i], 1e-30)
         rel = abs(final.rho[i] - initial.rho[i]) / ref

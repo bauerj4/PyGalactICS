@@ -57,7 +57,9 @@ def particle_rotation_curve(
     r = np.sqrt(x * x + y * y)
     v_phi = np.zeros_like(r)
     ok = r > 1e-8
-    v_phi[ok] = (-x[ok] * vy[ok] + y[ok] * vx[ok]) / r[ok]
+    # Prograde disk: ê_φ = (-sin φ, cos φ) ⇒ v_φ = (-y vx + x vy) / R
+    # (the opposite sign was writing a retrograde rotation curve for healthy ICs).
+    v_phi[ok] = (-y[ok] * vx[ok] + x[ok] * vy[ok]) / r[ok]
 
     edges = np.empty(len(r_vals) + 1)
     if len(r_vals) > 1:

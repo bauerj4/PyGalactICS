@@ -1,7 +1,7 @@
 {
-  "name": "mw_walkthrough",
+  "name": "bauer_morphology",
   "artifacts": {
-    "root": "notebooks/artifacts/campaign_walkthrough"
+    "root": "notebooks/artifacts/bauer_morphology"
   },
   "run": {
     "skip_done": false,
@@ -10,14 +10,14 @@
     "reevolve_checkpoints": false
   },
   "particles": {
-    "disk": 100000,
-    "halo": 100000,
+    "disk": 250000,
+    "halo": 250000,
     "bulge": 0
   },
   "softening": {
-    "disk": 0.1,
-    "halo": 0.5,
-    "bulge": 0.2
+    "disk": 0.15,
+    "halo": 0.15,
+    "bulge": 0.15
   },
   "parallel": {
     "mpi_ranks": 1,
@@ -30,33 +30,34 @@
   },
   "base_model": {
     "grid": {
-      "name": "base_mw",
+      "name": "bauer_ai",
       "base": "milky_way_disk_halo",
       "axes": {},
       "omit_components": [[]],
-      "coarse_grid": true,
+      "coarse_grid": false,
       "physics_backend": "python"
     },
     "patch": {
-      "disk_kinematics.toomre_q_target": 1.5
+      "disk.scale_height": 0.25,
+      "disk.scale_length": 2.5,
+      "disk_kinematics.toomre_q_target": 2.34
     }
   },
   "sweep": {
-    "enabled": false,
-    "grid_spec": "campaigns/mw_grid.json"
+    "enabled": false
   },
   "evolve": {
-    "end_time_gyr": 0.5,
-    "dt_base": 0.05,
-    "timestep_eta": 0.025,
+    "end_time_gyr": 5.0,
+    "dt_base": 0.02,
+    "timestep_eta": 0.02,
     "max_timestep_bin": 5,
     "timestep_update_every": 2,
     "integrator_order": 2,
-    "diagnostics_every": 20,
-    "particle_dump_every": 100
+    "diagnostics_every": 50,
+    "particle_dump_every": 200
   },
   "force": {
-    "theta": 0.6,
+    "theta": 0.45,
     "rebuild_every": 10,
     "active_subset": true,
     "bh_optimizations_preset": "optimized",
@@ -66,5 +67,5 @@
       "omp_schedule": "guided"
     }
   },
-  "checkpoints_gyr": [0.0, 0.05, 0.1]
+  "checkpoints_gyr": [0.0, 1.0, 2.5, 5.0]
 }

@@ -33,7 +33,8 @@ def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
 
     Returns per-component ``v_max`` and global ``r_max``.  Hot disk outliers
     (``v_max`` well above the median) often indicate bad sampling or a softening
-    mismatch vs ``ntropy_config.json``.
+    mismatch vs ``ntropy_config.json``.  Disk ``v_phi_mean`` near zero usually
+    means cylindrical velocities were written as Cartesian (gendisk bug).
     """
     out: dict[str, float] = {"r_max": float(np.max(np.linalg.norm(state.pos, axis=1)))}
     if state.tags is None:
@@ -46,6 +47,20 @@ def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
         speeds = np.linalg.norm(state.vel[mask], axis=1)
         out[f"{label}_v_max"] = float(np.max(speeds))
         out[f"{label}_v_median"] = float(np.median(speeds))
+        if label == "disk":
+            x = state.pos[mask, 0]
+            y = state.pos[mask, 1]
+            vx = state.vel[mask, 0]
+            vy = state.vel[mask, 1]
+            r = np.hypot(x, y)
+            ok = r > 1e-8
+            # Skip when positions are unset (unit tests) or all at R=0.
+            if int(np.count_nonzero(ok)) >= 10:
+                v_phi = (-y[ok] * vx[ok] + x[ok] * vy[ok]) / r[ok]
+                out["disk_v_phi_mean"] = float(np.mean(v_phi))
+                out["disk_v_phi_median"] = float(np.median(v_phi))
+                out["disk_r_median"] = float(np.median(r[ok]))
+                out["disk_v_phi_positive_frac"] = float(np.mean(v_phi > 0.0))
     return out
 
 
@@ -56,6 +71,9 @@ def ic_looks_stable(
     disk_v_max: float = 6.0,
     disk_v_max_ratio: float = 5.0,
     halo_v_max: float = 8.0,
+    disk_v_phi_mean_min: float = 0.8,
+    disk_v_phi_positive_frac_min: float = 0.9,
+    disk_r_median_min: float = 2.5,
 ) -> bool:
     """Heuristic pre-evolve check (hot tails, collapsed disk rotation, extreme radii)."""
     diag = diagnose_ic_stability(state)
@@ -72,6 +90,15 @@ def ic_looks_stable(
             return False
         if diag.get("halo_v_max", 0.0) > halo_v_max:
             return False
+        if "disk_v_phi_mean" in diag and diag["disk_v_phi_mean"] < disk_v_phi_mean_min:
+            return False
+        if (
+            "disk_v_phi_positive_frac" in diag
+            and diag["disk_v_phi_positive_frac"] < disk_v_phi_positive_frac_min
+        ):
+            return False
+        if "disk_r_median" in diag and diag["disk_r_median"] < disk_r_median_min:
+            return False
     elif diag.get("v_max", 0.0) > disk_v_max:
         return False
     return True
@@ -85,13 +112,19 @@ def explain_ic_instability(
     disk_v_max: float = 6.0,
     disk_v_max_ratio: float = 5.0,
     halo_v_max: float = 8.0,
+    disk_v_phi_mean_min: float = 0.8,
+    disk_v_phi_positive_frac_min: float = 0.9,
+    disk_r_median_min: float = 2.5,
 ) -> str:
     """
     Human-readable summary of why :func:`ic_looks_stable` would fail.
 
     Typical causes: collapsed ``cordbh.dat`` (low disk median |v|), hot disk
-    outliers (high disk ``v_max`` or ``v_max/v_median``), or an incompatible
-    DBH grid / Toomre-Q target for the coarse ``diskdf`` solve.
+    outliers (high disk ``v_max`` or ``v_max/v_median``), an incompatible
+    DBH grid / Toomre-Q target for the coarse ``diskdf`` solve, cylindrical
+    velocities written as Cartesian (near-zero mean ``v_phi``), or disk
+    positions sampled without the cylindrical ``R`` Jacobian (``R`` median too
+    small → hot inner disk + retrograde fraction).
     """
     if diag is None:
         if state is None:
@@ -122,6 +155,24 @@ def explain_ic_instability(
             )
         if halo_max > halo_v_max:
             reasons.append(f"halo v_max={halo_max:.2f} > {halo_v_max}")
+        vphi = diag.get("disk_v_phi_mean")
+        if vphi is not None and vphi < disk_v_phi_mean_min:
+            reasons.append(
+                f"disk mean v_phi={vphi:.3f} < {disk_v_phi_mean_min} "
+                "(weak net rotation — check gendisk Cartesian conversion / invu R sampling)"
+            )
+        frac = diag.get("disk_v_phi_positive_frac")
+        if frac is not None and frac < disk_v_phi_positive_frac_min:
+            reasons.append(
+                f"disk prograde frac={frac:.3f} < {disk_v_phi_positive_frac_min} "
+                "(too many retrograde orbits — usually central oversampling from missing invu)"
+            )
+        rmed = diag.get("disk_r_median")
+        if rmed is not None and rmed < disk_r_median_min:
+            reasons.append(
+                f"disk R median={rmed:.2f} kpc < {disk_r_median_min} "
+                "(positions too central — gendisk must use invu, not -rd*ln(u))"
+            )
     elif diag.get("v_max", 0.0) > disk_v_max:
         reasons.append(f"v_max={diag['v_max']:.2f} > {disk_v_max}")
     if not reasons:

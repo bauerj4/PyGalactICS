@@ -137,6 +137,47 @@ def test_two_body_symplectic_energy_preserved(
     )
 
 
+def _run_two_body(order: int, dt: float, n_steps: int) -> Simulation:
+    state = _two_body_kepler_state(eccentricity=0.3, eps_frac=1e-3)
+    cfg = RunConfig()
+    cfg.integrator = IntegratorConfig(
+        type="leapfrog", order=order, dt=dt, n_steps=n_steps
+    )
+    cfg.force.method = "brute"
+    cfg.parallel.enabled = False
+    cfg.output.write_final = False
+    sim = Simulation(cfg, state=state)
+    for _ in range(n_steps):
+        sim.step()
+    return sim
+
+
+def test_leapfrog2_global_error_is_second_order():
+    """Halving dt must reduce the final position error ~4x (slope 2)."""
+    t_end = 2.0
+    ref = _run_two_body(2, t_end / 32768, 32768).state.pos
+    errors = []
+    for n_steps in (512, 1024, 2048):
+        fin = _run_two_body(2, t_end / n_steps, n_steps).state.pos
+        errors.append(np.abs(fin - ref).max())
+    ratios = [errors[i] / errors[i + 1] for i in range(len(errors) - 1)]
+    for ratio in ratios:
+        assert 3.2 < ratio < 4.8, f"convergence ratios {ratios} (expected ~4)"
+
+
+def test_leapfrog2_is_time_reversible():
+    """Forward integration, velocity flip, backward integration recovers ICs."""
+    n_steps = 500
+    sim = _run_two_body(2, 0.005, 0)
+    pos0 = sim.state.pos.copy()
+    for _ in range(n_steps):
+        sim.step()
+    sim.state.vel *= -1.0
+    for _ in range(n_steps):
+        sim.step()
+    assert np.abs(sim.state.pos - pos0).max() < 1e-10
+
+
 def test_plummer_energy_drift_bounded():
     state = sample_plummer(seed=42)
     cfg = RunConfig()

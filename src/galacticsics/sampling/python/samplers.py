@@ -20,6 +20,27 @@ def _rng_from_legacy_seed(seed: int) -> np.random.Generator:
     return np.random.default_rng(abs(seed) if seed != 0 else 42)
 
 
+def _invu(u: float) -> float:
+    """
+    Invert ``u = -(1 + x) exp(-x)`` for dimensionless radius ``x = R / R_d``.
+
+    Legacy ``gendisk`` ``invu``: samples the cylindrical exponential-disk measure
+    ``P(x) ∝ x exp(-x)`` (surface density × 2πR), not bare ``exp(-x)``.
+    """
+    rg = 1.0
+    for _ in range(20):
+        e = math.exp(-rg)
+        f = -(1.0 + rg) * e - u
+        df = rg * e
+        if df <= 1e-30:
+            break
+        rnew = rg - f / df
+        if abs(rnew - rg) < 1e-8:
+            return max(float(rnew), 0.0)
+        rg = rnew
+    return max(float(rg), 0.0)
+
+
 def _log_sample_progress(
     progress_log: Callable[[str], None] | None,
     n_accepted: int,
@@ -130,9 +151,10 @@ def sample_disk_python(
         attempts += 1
         r_try = 2 * rtrunc
         while r_try > rtrunc:
-            u1 = max(rng.random(), 1e-30)
+            # Legacy: u1 = -ran ∈ (-1, 0]; R = rd * invu(u1) for P(R)∝R exp(-R/rd).
+            u1 = -max(rng.random(), 1e-30)
             v1 = rng.random() * 2 - 1
-            r_try = rd * (-math.log(u1))
+            r_try = rd * _invu(u1)
             z_try = zd * math.atanh(max(min(v1, 0.999), -0.999))
         rhoguess = math.exp(-r_try / rd) / math.cosh(z_try / zd) ** 2
         rhotst = _disk_midplane_density(r_try, z_try, pot) / max(rhoguess, 1e-30)
@@ -170,7 +192,15 @@ def sample_disk_python(
                 break
         if not accepted:
             continue
-        parts.append((mass, x, y, z_try, vR, vp, vz))
+        # Cylindrical (vR, vφ, vz) → Cartesian (vx, vy, vz); matches OpenMP/halo.
+        if r_try > 0.0:
+            cph = x / r_try
+            sph = y / r_try
+            vx = vR * cph - vp * sph
+            vy = vR * sph + vp * cph
+        else:
+            vx, vy = vR, vp
+        parts.append((mass, x, y, z_try, vx, vy, vz))
         _log_sample_progress(progress_log, len(parts), n_particles, "gendisk")
 
     if len(parts) < n_particles:
@@ -243,6 +273,11 @@ def sample_halo_python(
         log_df.append(float(ld))
     energies = np.asarray(energies, dtype=float)
     log_df = np.asarray(log_df, dtype=float)
+    # dfnfw.dat is written with energies descending (psi0 -> psic); interp1d
+    # with assume_sorted=True requires ascending abscissas.
+    order = np.argsort(energies)
+    energies = energies[order]
+    log_df = log_df[order]
     log_interp = interp1d(
         energies,
         log_df,
@@ -257,7 +292,9 @@ def sample_halo_python(
             return 0.0
         return float(np.exp(log_interp(psi)))
 
-    fcut = df_halo(psic)
+    # Lowered-DF cutoff (legacy genhalo): interpolate at psic directly, since
+    # df_halo() clamps to zero at the cutoff.
+    fcut = float(np.exp(log_interp(psic)))
     from galacticsics.potential.poisson.densities import halo_density_spherical
 
     halo = pot.model.halo
@@ -396,6 +433,10 @@ def sample_bulge_python(
         log_df.append(float(ld))
     energies = np.asarray(energies, dtype=float)
     log_df = np.asarray(log_df, dtype=float)
+    # dfsersic.dat energies are descending; sort for assume_sorted interp1d.
+    order = np.argsort(energies)
+    energies = energies[order]
+    log_df = log_df[order]
     log_interp = interp1d(
         energies,
         log_df,

@@ -356,12 +356,48 @@ def _write_evolve_config(
     force_rebuild_every: int = 5,
     force_theta: float = 0.6,
     force_active_subset: bool = True,
+    mpi_local_trees: bool = True,
     dt_base: float = 0.025,
     timestep_eta: float = 0.025,
     max_timestep_bin: int = 6,
     timestep_update_every: int = 1,
     integrator_order: int = 2,
 ) -> Path:
+    """
+    Write ``ntropy_config.json`` for one campaign model's evolve stage.
+
+    Parameters
+    ----------
+    work_dir : Path
+        Model directory; the config references ``merged.dat`` therein.
+    registry : TypeRegistry
+        Particle type registry serialized into ``particle_types``.
+    end_time_gyr : float
+        Evolve duration [Gyr].
+    diagnostics_every, particle_dump_every : int
+        Tiered diagnostics / particle dump cadence (fine substeps).
+    mpi_ranks : int
+        Enables the ``parallel`` block when > 1.
+    force_method : str, optional
+        ``bh_c`` when the C extension is built, else ``bh`` (auto).
+    bh_optimizations : BhOptimizationsConfig, optional
+        C kernel preset/flags written under ``force.bh_optimizations``.
+    force_rebuild_every, force_theta, force_active_subset : int, float, bool
+        Barnes–Hut tree rebuild cadence, opening angle, and active-subset
+        force evaluation toggle.
+    mpi_local_trees : bool
+        Gadget-style local octrees + LET under MPI (default True);
+        False writes the replicated-tree fallback.
+    dt_base, timestep_eta, max_timestep_bin, timestep_update_every : float, float, int, int
+        Tiered leapfrog timestep hierarchy parameters.
+    integrator_order : int
+        Leapfrog order (1 or 2).
+
+    Returns
+    -------
+    cfg_path : Path
+        Path of the written JSON config.
+    """
     cfg_path = work_dir / "ntropy_config.json"
     method = force_method or _default_force_method()
     bh_opts = bh_optimizations or _default_bh_optimizations()
@@ -379,6 +415,7 @@ def _write_evolve_config(
             "rebuild_every": force_rebuild_every,
             "active_subset": force_active_subset,
             "bh_optimizations": bh_opts.to_config_dict(),
+            "mpi_local_trees": mpi_local_trees,
         },
         "parallel": parallel,
         "integrator": {
@@ -510,6 +547,7 @@ def _run_evolve(
     force_rebuild_every: int = 5,
     force_theta: float = 0.6,
     force_active_subset: bool = True,
+    mpi_local_trees: bool = True,
     dt_base: float = 0.025,
     timestep_eta: float = 0.025,
     max_timestep_bin: int = 6,
@@ -522,6 +560,47 @@ def _run_evolve(
     progress: CampaignProgress | None = None,
     evolve_label: str = "evolve",
 ) -> dict:
+    """
+    Merge sampled ICs and run the N-body evolve stage for one model.
+
+    Validates IC stability (virial diagnostic) before evolving. When MPI
+    is available and ``mpi_ranks > 1``, launches
+    ``ntropy.benchmark.mpi_simulation_worker`` via ``mpirun`` with the
+    resolved core budget, tees worker output to
+    ``work_dir/evolve_mpirun.log``, and tails the JSONL progress stream;
+    otherwise runs the simulation in-process.
+
+    Parameters
+    ----------
+    work_dir : Path
+        Model directory containing sampled component particle files.
+    end_time_gyr : float
+        Evolve duration [Gyr].
+    mpi_ranks, core_fraction : int, float
+        Requested ranks and the share of logical CPUs to budget across
+        ranks × OpenMP threads (ranks are clamped to the budget).
+    mpi_local_trees : bool
+        Local octrees + LET under MPI (default True).
+    progress : CampaignProgress, optional
+        Stage logger; silent when disabled.
+    evolve_label : str
+        Progress label for logs and the MPI worker.
+
+    Other parameters mirror :func:`_write_evolve_config` and are passed
+    through to the generated ``ntropy_config.json``.
+
+    Returns
+    -------
+    summary : dict
+        ``evolve_seconds``, ``dE_over_E0``, ``mpi`` flag, rank count, and
+        rotation-curve diagnostic paths.
+
+    Raises
+    ------
+    RuntimeError
+        When ICs fail the stability gate or the MPI worker exits without
+        writing ``evolve_result.json``.
+    """
     from galacticsics.campaign.run_config import (
         build_type_registry,
         default_walkthrough_config,
@@ -564,7 +643,8 @@ def _run_evolve(
             )
         progress.log(f"  parallel: {format_parallel_budget(parallel_budget)}")
         progress.log(
-            f"  force: {_default_force_method()} | bh_optimizations preset={bh_opts.preset}"
+            f"  force: {_default_force_method()} | bh_optimizations preset={bh_opts.preset} "
+            f"| mpi_local_trees={mpi_local_trees}"
         )
 
     cfg_path = _write_evolve_config(
@@ -578,6 +658,7 @@ def _run_evolve(
         force_rebuild_every=force_rebuild_every,
         force_theta=force_theta,
         force_active_subset=force_active_subset,
+        mpi_local_trees=mpi_local_trees,
         dt_base=dt_base,
         timestep_eta=timestep_eta,
         max_timestep_bin=max_timestep_bin,
@@ -646,6 +727,7 @@ def _run_evolve(
                 cwd=work_dir,
                 venv_bin=_venv_bin(),
                 extra_env=mpi_env,
+                log_path=work_dir / "evolve_mpirun.log",
             )
         finally:
             tail_stop.set()
@@ -725,6 +807,7 @@ def run_campaign(
     force_rebuild_every: int = 5,
     force_theta: float = 0.6,
     force_active_subset: bool = True,
+    mpi_local_trees: bool = True,
     bh_optimizations_preset: str = "optimized",
     bh_optimizations_extra: dict | None = None,
     eps_by_component: dict[str, float] | None = None,
@@ -777,6 +860,10 @@ def run_campaign(
         Rebuild Barnes–Hut tree every N fine substeps (default ``5``).
         Larger values reduce tree-build overhead on CPU at the cost of
         slightly lower force accuracy between rebuilds.
+    mpi_local_trees : bool
+        When True (default), MPI Barnes–Hut uses per-rank local octrees plus
+        a Local Essential Tree (LET) exchange. Set False for a full replicated
+        tree on every rank.
     bh_optimizations_preset : {'legacy', 'optimized'}
         C Barnes–Hut kernel preset written to ``ntropy_config.json``
         (only applies when ``force.method`` is ``bh_c``).
@@ -967,6 +1054,7 @@ def run_campaign(
                     force_rebuild_every=force_rebuild_every,
                     force_theta=force_theta,
                     force_active_subset=force_active_subset,
+                    mpi_local_trees=mpi_local_trees,
                     dt_base=dt_base,
                     timestep_eta=timestep_eta,
                     max_timestep_bin=max_timestep_bin,

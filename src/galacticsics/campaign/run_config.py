@@ -95,7 +95,7 @@ def default_walkthrough_config() -> dict[str, Any]:
             "end_time_gyr": 0.5,
             "dt_base": 0.05,
             "timestep_eta": 0.025,
-            "max_timestep_bin": 7,
+            "max_timestep_bin": 5,
             "timestep_update_every": 2,
             "integrator_order": 2,
             "diagnostics_every": 20,
@@ -111,6 +111,8 @@ def default_walkthrough_config() -> dict[str, Any]:
                 "simd_leaves": True,
                 "omp_schedule": "guided",
             },
+            # Gadget-style local octrees + LET under MPI (default on).
+            "mpi_local_trees": True,
         },
         "checkpoints_gyr": [0.0, 0.05, 0.1],
     }
@@ -430,6 +432,7 @@ class WalkthroughConfig:
             "force_rebuild_every": int(fc.get("rebuild_every", 10)),
             "force_theta": float(fc.get("theta", 0.6)),
             "force_active_subset": bool(fc.get("active_subset", True)),
+            "mpi_local_trees": bool(fc.get("mpi_local_trees", True)),
             "bh_optimizations_preset": preset,
             "bh_optimizations_extra": bh_extra,
             "eps_by_component": softening_eps_by_component(self.raw),
@@ -475,7 +478,8 @@ class WalkthroughConfig:
             format_tiered_timestep_summary(ts),
             format_dbh_grid_summary(preview),
             f"Force: theta={kw['force_theta']}, rebuild_every={kw['force_rebuild_every']}, "
-            f"active_subset={kw['force_active_subset']}, bh={kw['bh_optimizations_preset']}",
+            f"active_subset={kw['force_active_subset']}, "
+            f"mpi_local_trees={kw['mpi_local_trees']}, bh={kw['bh_optimizations_preset']}",
             f"Parallel: {format_parallel_budget(budget)}",
             sample_openmp_summary(self.raw),
             f"Artifacts → {self.paths.artifacts}",
@@ -540,6 +544,10 @@ CONFIG_FIELD_DOCS: dict[str, str] = {
     "force.theta": "Barnes–Hut opening angle (0.5 accurate, 0.6–0.7 faster).",
     "force.rebuild_every": "Rebuild tree every N substeps (10 = less build overhead).",
     "force.active_subset": "Evaluate forces only on active tiered particles (faster).",
+    "force.mpi_local_trees": (
+        "Gadget-style local octrees + LET under MPI (default True); "
+        "False = full replicated tree per rank."
+    ),
     "force.bh_optimizations_preset": "legacy or optimized C kernel preset.",
     "force.bh_optimizations.simd_leaves": "4-wide unrolled leaf loop in bh_c.",
     "force.bh_optimizations.omp_schedule": "OpenMP schedule: static, guided, or dynamic.",
