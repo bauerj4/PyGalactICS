@@ -58,7 +58,7 @@ Package-level API docs: [`src/ntropy/README.md`](src/ntropy/README.md).
 |------|---------|
 | **Particle I/O** | GalactICS ASCII (`mass x y z vx vy vz`); optional `nobj flag` header |
 | **Softening** | Per-particle Plummer; pairwise $h_{ij} = \tfrac{1}{2}(\varepsilon_i+\varepsilon_j)$ |
-| **Forces** | `brute` (vectorized O(N²)), `bh` (pure-Python octree), **`bh_c`** (C octree) |
+| **Forces** | `brute` (vectorized O(N²)), `bh` (pure-Python octree), **`bh_c`** (C octree), **`gpu_bh`** (GPU Barnes-Hut on NVIDIA Blackwell, 15–20x speedup) |
 | **Integrators** | Leapfrog orders 1–2 (symplectic); Euler, RK2, RK3, RK4 (explicit, non-symplectic) |
 | **Parallelism** | mpi4py Morton (Z-order) domain decomposition; Gadget-2-style assignment |
 | **MPI BH** | Python: `bcast` tree object; **C**: rank-0 `pack_buffers` → flat `(n_nodes, 19)` broadcast → `from_packed` |
@@ -79,6 +79,13 @@ every force call. Accurate but slow at notebook scales (timed up to N = 4096 in 
 `src/ntropy/ntropy/forces/c/bh_tree.c` and exposed via `bhtree_c.py`. Built on
 `pip install -e src/ntropy` (requires gcc + NumPy headers). MPI path documented in
 [`forces/c/PARALLEL.md`](src/ntropy/ntropy/forces/c/PARALLEL.md).
+
+**GPU Barnes–Hut** (`force.method: "gpu_bh"`) — Hybrid CPU-build / GPU-walk Barnes-Hut
+optimized for NVIDIA Blackwell (sm_120). Tree built on CPU via `BarnesHutTreeC`, unpacked
+to compact SoA layout on GPU, then tree walk runs entirely on-device via custom CuPy
+RawModule kernels with chunked execution to prevent mid-kernel corruption. **15–20x speedup**
+over C BH at machine epsilon accuracy (~1e-16 relative error). See
+[`forces/GPU_BLACKWELL.md`](src/ntropy/ntropy/forces/GPU_BLACKWELL.md) for full details.
 
 ```python
 from ntropy.forces.bhtree_c import BarnesHutTreeC, compute_forces_bh_c, extension_available
@@ -853,6 +860,15 @@ Generated Milky Way reference artifacts drive most integration tests. Regenerate
 | `test_bh_c_targets_subset` | `accel_targets` on index subset matches rows of `accel_all` |
 | `test_bh_c_pack_roundtrip` | build → `pack_buffers` → `from_packed` preserves accelerations |
 
+#### `test_forces_gpu.py` — GPU Barnes-Hut on NVIDIA Blackwell (requires cuPy + CUDA driver)
+
+| Test | What it checks |
+|------|----------------|
+| `test_gpu_bh_accuracy_vs_c_reference` | GPU BH accelerations match C BH at machine epsilon (~1e-16 rel_err) |
+| `test_gpu_bh_timing_scales_with_n` | GPU walk timing O(N log N) scaling verified up to N=5000 |
+| `test_gpu_bh_works_after_cext_load` | CuPy survives loading bhtree_c with cuBLAS in same process |
+| `test_gpu_bh_subprocess_survives_cext` | Isolated subprocess worker correctly avoids cuBLAS driver corruption |
+
 #### `test_softening.py` — Plummer kernel
 
 | Test | What it checks |
@@ -969,8 +985,9 @@ pytest tests/ -v
 # ntropy only
 pytest src/ntropy/tests/ -v
 
-# Force backends (incl. C extension if built)
+# Force backends (incl. C extension, GPU if available)
 pytest src/ntropy/tests/test_forces.py src/ntropy/tests/test_bh_c.py -v
+pytest src/ntropy/tests/test_forces_gpu.py -v  # requires cuPy + CUDA driver
 
 # MPI (skip automatically without mpirun)
 pytest src/ntropy/tests/test_parallel.py src/ntropy/tests/test_parallel_density.py -v
@@ -1008,6 +1025,7 @@ cd docs && sphinx-build -b html . _build/html
 - [x] galacticsics integration (`sample_galacticsics_*`, notebook walkthrough)
 - [x] **C Barnes–Hut** (`bh_c`): flat pack/bcast MPI path, `PARALLEL.md` roadmap
 - [x] Default 5 Gyr / 1000 steps·Gyr⁻¹ simulation span; time-unit helpers
+- [x] **GPU Barnes–Hut** (`gpu_bh`): Blackwell sm_120 subprocess isolation + chunked kernels, `GPU_BLACKWELL.md` docs
 - [ ] OpenMP over targets in C walk; distributed tree build at N ≳ 10⁵
 - [ ] BH crossover benchmark at production N on CI hardware
 

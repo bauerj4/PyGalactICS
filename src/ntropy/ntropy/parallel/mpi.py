@@ -93,7 +93,7 @@ def compute_forces_mpi(
     mass: np.ndarray,
     eps: np.ndarray,
     *,
-    method: Literal["brute", "bh", "bh_c"] = "bh",
+    method: Literal["brute", "bh", "bh_c", "gpu_direct", "gpu_bh"] = "bh",
     theta: float = 0.5,
     comm=None,
     bh_opts: BhOptimizationsConfig | None = None,
@@ -127,8 +127,9 @@ def compute_forces_mpi(
         Particle masses.
     eps : ndarray, shape (N,)
         Per-particle softening lengths.
-    method : {'brute', 'bh', 'bh_c'}
-        Force evaluation backend.
+    method : {'brute', 'bh', 'bh_c', 'gpu_direct', 'gpu_bh'}
+        Force evaluation backend.  ``'gpu_direct'`` and ``'gpu_bh'`` require
+        CuPy + a CUDA-capable GPU; they fall back to ``'bh_c'`` when unavailable.
     theta : float
         Barnes–Hut opening angle (ignored for brute force).
     comm : MPI communicator, optional
@@ -166,10 +167,14 @@ def compute_forces_mpi(
     rank = comm.Get_rank()
 
     if size == 1:
+        # On single-rank, prefer GPU when available
         return _serial_forces(
             pos, mass, eps, method=method, theta=theta, bh_opts=bh_opts,
             cache=cache, rebuild=rebuild,
         )
+
+    from ntropy.forces import gpu_available as _gpu_avail
+    use_gpu = _gpu_avail() and method in ("gpu_direct", "gpu_bh")
 
     if not _MPI_AVAILABLE:
         raise ImportError(
@@ -183,6 +188,11 @@ def compute_forces_mpi(
     local_targets = order[slices[rank]]
 
     use_local_trees = bool(mpi_local_trees) and method in ("bh", "bh_c")
+
+    # GPU backend uses the same domain decomposition; it just changes the
+    # force-evaluation kernel (tree is still built on CPU, walk on GPU).
+    if method in ("gpu_direct", "gpu_bh"):
+        use_local_trees = False  # rely on replicated tree path for simplicity
 
     if use_local_trees:
         local_acc = _forces_local_essential(
@@ -210,6 +220,22 @@ def compute_forces_mpi(
         local_acc = _forces_replicated_bh_c(
             pos, mass, eps, local_targets=local_targets, theta=theta,
             bh_opts=bh_opts, cache=cache, rebuild=rebuild,
+        )
+    elif method == "gpu_direct":
+        from ntropy.forces.gpu_direct import compute_forces_gpu as _gpu_force
+        if cache is not None:
+            cache.clear()
+        local_acc = _gpu_force(
+            pos, mass, eps, target_indices=local_targets
+        )
+    elif method == "gpu_bh":
+        from ntropy.forces.gpu_bh import (
+            compute_forces_gpu_bh as _gpu_bh_force,
+        )
+        if cache is not None:
+            cache.clear()
+        local_acc = _gpu_bh_force(
+            pos, mass, eps, theta=theta, target_indices=local_targets,
         )
     else:
         if cache is not None:

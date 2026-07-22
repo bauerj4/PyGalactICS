@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = ["cupy-cuda12x>=13.0.0"]
 mpi = ["mpi4py>=3.1"]
 galacticsics = []  # sibling package; install from repo root: pip install -e .
 dev = [
@@ -25,7 +26,7 @@ dev = [
     "pandas>=2.0",
     "jupyter>=1.0",
 ]
-all = ["ntropy[galacticsics,dev,mpi]"]
+all = ["ntropy[galacticsics,dev,mpi,gpu]"]
 
 [project.scripts]
 ntropy-run = "ntropy.cli:main"
