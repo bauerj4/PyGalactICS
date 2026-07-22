@@ -170,7 +170,7 @@ def python_sample_bulge(
     stream_output: bool = False,
     progress_log: Callable[[str], None] | None = None,
 ):
-    """Sample bulge particles with the Python ``genbulge`` port."""
+    """Sample bulge particles (OpenMP ``genbulge`` when available)."""
     del stream_output
     ps = sample_bulge_python(
         work_dir,
@@ -178,6 +178,8 @@ def python_sample_bulge(
         seed=config.seed_bulge,
         center=config.center,
         streaming=config.stream_bulge,
+        progress_log=progress_log,
+        config=config,
     )
     ps.write_ascii(work_dir / "bulge")
     return ps

@@ -15,6 +15,10 @@ jupyter notebook notebooks/
 
 | Notebook | Description |
 |----------|-------------|
-| [`nfw_halo_walkthrough.ipynb`](nfw_halo_walkthrough.ipynb) | **GalactICS → ntropy** end-to-end: IC generation, force accuracy, parallelism scaling, **|ΔE/E₀|** symplectic (leapfrog) vs explicit (Euler, RK2–4) energy drift, density stability |
+| [`gpu_bh_dbh.ipynb`](gpu_bh_dbh.ipynb) | **GPU Barnes–Hut DBH**: 5M disk + 1M bulge + 1M halo, single adaptive `tiered_leapfrog` + particle dumps |
+| [`nfw_halo_walkthrough.ipynb`](nfw_halo_walkthrough.ipynb) | GalactICS → ntropy end-to-end NFW halo walkthrough |
+| [`campaign_density_walkthrough.ipynb`](campaign_density_walkthrough.ipynb) | MW campaign density evolution & disk projections |
 
-Artifacts (plots, particle files) land in `notebooks/artifacts/nfw_walkthrough/`.
+GPU BH implementation notes: [`src/ntropy/ntropy/forces/GPU_BLACKWELL.md`](../src/ntropy/ntropy/forces/GPU_BLACKWELL.md).
+
+Artifacts for the GPU DBH notebook land in `notebooks/artifacts/gpu_bh_dbh/`.

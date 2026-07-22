@@ -1,5 +1,5 @@
 /*
- * sampler_impl.c — OpenMP particle samplers (gendisk / genhalo).
+ * sampler_impl.c — OpenMP particle samplers (gendisk / genhalo / genbulge).
  */
 
 #include "sampler.h"
@@ -128,6 +128,44 @@ double df_eval(const DfPack *df, double psi) {
     }
     double logf = interp1d(df->energy, df->log_df, df->n, psi);
     return exp(logf);
+}
+
+double df_fmax_at(const DfPack *df, double psi) {
+    if (df->fmax_cum == NULL || df->n <= 0) {
+        double f = df_eval(df, psi) - df->fcut;
+        return (f > 0.0) ? f : 0.0;
+    }
+    if (psi <= df->energy[0]) {
+        return df->fmax_cum[0];
+    }
+    if (psi >= df->energy[df->n - 1]) {
+        return df->fmax_cum[df->n - 1];
+    }
+    /* searchsorted(side=right) - 1: last node with energy <= psi */
+    int lo = 0;
+    int hi = df->n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (df->energy[mid] <= psi) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    int j = lo - 1;
+    if (j < 0) {
+        j = 0;
+    }
+    return df->fmax_cum[j];
+}
+
+double sersic_density_spherical(const BulgeParams *b, double r) {
+    if (r <= 0.0 || b->Re <= 0.0 || b->n <= 0.0) {
+        return 0.0;
+    }
+    double u = r / b->Re;
+    double un = pow(u, 1.0 / b->n);
+    return b->rho0 * pow(u, -b->ppp) * exp(-b->butt * un);
 }
 
 /* --- Legendre (even l) --- */
@@ -691,6 +729,142 @@ int sample_disk_omp(
                 out[idx * 7 + 1] = x;
                 out[idx * 7 + 2] = y;
                 out[idx * 7 + 3] = z_try;
+                out[idx * 7 + 4] = vx;
+                out[idx * 7 + 5] = vy;
+                out[idx * 7 + 6] = vz;
+            }
+        }
+    }
+
+    if (failed || accepted < n_particles) {
+        return -1;
+    }
+    if (opts->center) {
+        center_particles(out, n_particles);
+    }
+    return 0;
+}
+
+int sample_bulge_omp(
+    double *out,
+    int n_particles,
+    int seed,
+    double mass,
+    double bulgeedge,
+    double wmax,
+    double wmin,
+    double streaming,
+    const PotPack *pot,
+    const BulgeParams *bulge,
+    const DfPack *df,
+    const SamplerOpts *opts
+) {
+    int n_threads = opts->n_threads;
+#ifdef _OPENMP
+    if (n_threads > 0) {
+        omp_set_num_threads(n_threads);
+    }
+#endif
+    int accepted = 0;
+    int failed = 0;
+    int max_attempts = opts->max_attempts;
+
+#pragma omp parallel
+    {
+        SamplerRng rng;
+#ifdef _OPENMP
+        int tid = omp_get_thread_num();
+#else
+        int tid = 0;
+#endif
+        sampler_rng_seed(&rng, seed, tid);
+        int local_attempts = 0;
+
+        while (1) {
+            int slot;
+#pragma omp atomic read
+            slot = accepted;
+            if (slot >= n_particles) {
+                break;
+            }
+            if (local_attempts >= max_attempts) {
+#pragma omp critical
+                {
+                    failed = 1;
+                }
+                break;
+            }
+            local_attempts++;
+
+            /* Spherical proposal: r ∝ r² ρ(r), μ=cosθ uniform, φ uniform. */
+            double rad = bulgeedge * sampler_rng_uniform(&rng);
+            double w = sersic_density_spherical(bulge, rad) * rad * rad;
+            if (w < wmin || wmax * sampler_rng_uniform(&rng) > w) {
+                continue;
+            }
+            double mu = 2.0 * sampler_rng_uniform(&rng) - 1.0;
+            double phi = sampler_rng_range(&rng, 0.0, 2.0 * M_PI);
+            double r_cyl = rad * sqrt(fmax(0.0, 1.0 - mu * mu));
+            double z = rad * mu;
+            double x = r_cyl * cos(phi);
+            double y = r_cyl * sin(phi);
+            double psi = pot_eval(pot, r_cyl, z);
+            if (psi < pot->psic) {
+                continue;
+            }
+            double vmax2 = 2.0 * (psi - pot->psic);
+            double vmax = sqrt(fmax(vmax2, 0.0));
+            double fmax = df_fmax_at(df, psi);
+            if (fmax <= 0.0) {
+                continue;
+            }
+            int vel_ok = 0;
+            double vx = 0.0, vy = 0.0, vz = 0.0;
+            for (int inner = 0; inner < 10000; inner++) {
+                double v2 = 1.1 * vmax2;
+                while (v2 > vmax2) {
+                    vx = 2.0 * vmax * (sampler_rng_uniform(&rng) - 0.5);
+                    vy = 2.0 * vmax * (sampler_rng_uniform(&rng) - 0.5);
+                    vz = 2.0 * vmax * (sampler_rng_uniform(&rng) - 0.5);
+                    v2 = vx * vx + vy * vy + vz * vz;
+                }
+                double energy = psi - 0.5 * v2;
+                double f0 = df_eval(df, energy) - df->fcut;
+                if (f0 < 0.0) {
+                    f0 = 0.0;
+                }
+                if (fmax * sampler_rng_uniform(&rng) <= f0) {
+                    vel_ok = 1;
+                    break;
+                }
+            }
+            if (!vel_ok) {
+                continue;
+            }
+            /* Streaming: flip cylindrical vφ sign in the (x,y) basis. */
+            double r_cyl_pos = hypot(x, y);
+            if (r_cyl_pos > 0.0) {
+                double cph = x / r_cyl_pos;
+                double sph = y / r_cyl_pos;
+                double vR = vx * cph + vy * sph;
+                double vp = -vx * sph + vy * cph;
+                if (sampler_rng_uniform(&rng) < streaming) {
+                    vp = fabs(vp);
+                } else {
+                    vp = -fabs(vp);
+                }
+                vx = vR * cph - vp * sph;
+                vy = vR * sph + vp * cph;
+            }
+
+            int idx;
+#pragma omp atomic capture
+            idx = accepted++;
+            if (idx < n_particles) {
+                out[idx * 7 + 0] = mass;
+                out[idx * 7 + 1] = x;
+                out[idx * 7 + 2] = y;
+                out[idx * 7 + 3] = z;
                 out[idx * 7 + 4] = vx;
                 out[idx * 7 + 5] = vy;
                 out[idx * 7 + 6] = vz;

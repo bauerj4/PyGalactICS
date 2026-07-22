@@ -1,4 +1,4 @@
-"""Accelerated polar shell integration (optional OpenMP C extension)."""
+"""Accelerated polar shell integration (OpenMP C and optional CuPy)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,11 @@ try:
 except ImportError:
     _poisson_c = None  # type: ignore[assignment]
 
+try:
+    from galacticsics.potential.poisson import gpu as _poisson_gpu
+except ImportError:
+    _poisson_gpu = None  # type: ignore[assignment]
+
 
 def extension_available() -> bool:
     return _poisson_c is not None
@@ -24,6 +29,10 @@ def openmp_enabled() -> bool:
     if _poisson_c is None:
         return False
     return bool(_poisson_c.extension_available())
+
+
+def gpu_available() -> bool:
+    return _poisson_gpu is not None and bool(_poisson_gpu.cupy_available())
 
 
 def reload_extension() -> bool:
@@ -39,9 +48,21 @@ def reload_extension() -> bool:
 
 
 def _resolve_poisson_threads(n_threads: int | None) -> int:
-    if n_threads is None:
-        n_threads = int(os.environ.get("GALACTICSICS_POISSON_THREADS", "0"))
-    return max(0, int(n_threads))
+    """
+    Resolve OpenMP thread count for the C polar integrator.
+
+    Default (env unset): use all CPUs when the OpenMP extension is available,
+    so the solver is not silently single-threaded. Set
+    ``GALACTICSICS_POISSON_THREADS=0`` to force the Python path.
+    """
+    if n_threads is not None:
+        return max(0, int(n_threads))
+    env = os.environ.get("GALACTICSICS_POISSON_THREADS")
+    if env is not None and env.strip() != "":
+        return max(0, int(env))
+    if openmp_enabled():
+        return int(os.cpu_count() or 1)
+    return 0
 
 
 def _fill_density_harmonics_python(
@@ -166,7 +187,35 @@ def fill_density_harmonics(
 ) -> None:
     """
     Fill ``adens`` for one Poisson iteration using the fastest available backend.
+
+    Dispatch order:
+    1. CuPy batched polar fill when ``GALACTICSICS_POISSON_GPU=1`` and a device exists
+    2. OpenMP C when ``GALACTICSICS_POISSON_THREADS>0``
+    3. Python (± thread pool)
     """
+    use_gpu = (
+        _poisson_gpu is not None
+        and _poisson_gpu.gpu_requested()
+        and _poisson_gpu.cupy_available()
+        and halo_psi_tables is not None
+    )
+    if use_gpu:
+        _poisson_gpu.fill_density_harmonics_cupy(
+            density_harmonics,
+            arrays=arrays,
+            model=model,
+            radial_step=float(radial_step),
+            n_radial_shells=int(n_radial_shells),
+            active_lmax=int(active_lmax),
+            n_polar_nodes=int(n_polar_nodes),
+            dens_fn_halo=dens_fn_halo,
+            dens_fn_bulge=dens_fn_bulge,
+            cutoff_potential=float(cutoff_potential),
+            halo_psi_tables=halo_psi_tables,
+            bulge_psi_tables=bulge_psi_tables,
+        )
+        return
+
     threads = _resolve_poisson_threads(n_threads)
     use_c = (
         _poisson_c is not None

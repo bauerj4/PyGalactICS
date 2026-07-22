@@ -45,6 +45,7 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "disk_df_positive_min_frac": 0.999,
     "bulge_energy_df_max_log_rel": 0.5,
     "virial_residual_rel_max": 0.55,
+    "potential_virial_residual_rel_max": 0.25,
 }
 
 
@@ -520,6 +521,8 @@ def validate_ic_distribution_functions(
     thresholds: dict[str, float] | None = None,
     include_virial: bool = False,
     include_virial_in_pass: bool = False,
+    include_potential_virial: bool = False,
+    include_potential_virial_in_pass: bool = False,
 ) -> dict[str, Any]:
     """
     Run halo, disk, and bulge DF checks on an IC snapshot.
@@ -532,7 +535,12 @@ def validate_ic_distribution_functions(
     (equilibrium in the fixed ``dbh`` potential, not pure self-gravity).  Pass
     ``include_virial=True`` for informational output only; it does not affect
     ``overall_pass`` unless ``include_virial_in_pass=True``.
+
+    Prefer ``include_potential_virial=True`` / ``include_potential_virial_in_pass``
+    for a softening-free virial check against ``∇Ψ``.
     """
+    from galacticsics.diagnostics.virial import virial_diagnostic_potential
+
     work_dir = Path(work_dir)
     halo = validate_halo_df(state, model, work_dir, thresholds=thresholds)
     disk = validate_disk_df(state, model, work_dir, thresholds=thresholds)
@@ -547,8 +555,8 @@ def validate_ic_distribution_functions(
     if bulge.get("enabled") and not bulge.get("skipped"):
         passes.append(bulge.get("pass", False))
 
+    thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if include_virial:
-        thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
         virial = virial_diagnostic(
             state.pos, state.vel, state.mass, state.eps, rtol=thr["virial_residual_rel_max"]
         )
@@ -556,6 +564,20 @@ def validate_ic_distribution_functions(
         summary["virial_pass"] = bool(virial["is_virial_equilibrium"])
         if include_virial_in_pass:
             passes.append(summary["virial_pass"])
+
+    if include_potential_virial:
+        pot_path = work_dir / "dbh.dat"
+        pot_virial = virial_diagnostic_potential(
+            state.pos,
+            state.vel,
+            state.mass,
+            pot_path,
+            rtol=thr["potential_virial_residual_rel_max"],
+        )
+        summary["potential_virial"] = pot_virial
+        summary["potential_virial_pass"] = bool(pot_virial["is_virial_equilibrium"])
+        if include_potential_virial_in_pass:
+            passes.append(summary["potential_virial_pass"])
 
     summary["overall_pass"] = all(passes)
     return summary

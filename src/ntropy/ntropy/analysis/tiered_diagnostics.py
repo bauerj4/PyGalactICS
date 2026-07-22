@@ -234,6 +234,8 @@ def write_particle_bin_dump(
         "pos": state.pos,
         "vel": state.vel,
     }
+    if state.tags is not None:
+        payload["tags"] = np.asarray(state.tags).astype("U16")
     if acc is not None:
         payload["accel_mag"] = np.linalg.norm(acc, axis=1)
     path.parent.mkdir(parents=True, exist_ok=True)

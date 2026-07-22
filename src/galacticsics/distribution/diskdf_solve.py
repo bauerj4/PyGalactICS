@@ -387,7 +387,15 @@ def solve_diskdf_python(
     -------
     DiskCorrectionTable
         Radial ``f_d`` and ``f_sz`` correction splines written to ``cordbh.dat``.
+
+    Notes
+    -----
+    Set ``GALACTICSICS_DISKDF_WORKERS`` to parallelize the radial ``vφ``
+    quadratures within each correction iteration (default ``1`` = serial).
     """
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
     work_dir = Path(work_dir)
     pot = read_harmonic_potential(work_dir / "dbh.dat")
     freq = read_frequency_table(work_dir / "freqdbh.dat")
@@ -398,6 +406,7 @@ def solve_diskdf_python(
     niter = n_iterations or kin.n_iterations
     relax = _diskdf_relaxation(model) if relax is None else float(relax)
     f_d_cap = _diskdf_f_d_cap(model)
+    n_workers = max(1, int(os.environ.get("GALACTICSICS_DISKDF_WORKERS", "1")))
     drspl = (disk.outer_radius + 2 * disk.trunc_width) / nrspl
     rr = np.linspace(0.0, drspl * nrspl, nrspl + 1)
     fdrat = np.ones(nrspl + 1, dtype=float)
@@ -423,23 +432,40 @@ def solve_diskdf_python(
         ]
     )
 
+    active_idx = list(np.where(active)[0])
+
+    def _radial_ratios(ir: int) -> tuple[int, float, float]:
+        r = float(rr[ir])
+        omega = freq.omega(r)
+        sigr = math.sqrt(_sigma_r2_base(r, model))
+        vc = r * omega
+        dvr = 0.1 * sigr
+        vt = vc + (np.arange(1, 102) - 51) * dvr
+        d0 = _integrate_vphi(vt, pot, freq, rcirc_fn, spline_d, spline_sz, r, 0.0)
+        dz2 = _integrate_vphi(vt, pot, freq, rcirc_fn, spline_d, spline_sz, r, zdisk)
+        return (
+            ir,
+            min(d0 / max(rho0[ir], 1e-30), 1e6),
+            min(dz2 / max(rhoz[ir], 1e-30), 1e6),
+        )
+
     for _ in range(niter):
         f_d = spline_d(rr)
         f_sz = spline_sz(rr)
+        del f_d, f_sz
         drat = np.ones(nrspl + 1, dtype=float)
         dz2rat = np.ones(nrspl + 1, dtype=float)
 
-        for ir in np.where(active)[0]:
-            r = float(rr[ir])
-            omega = freq.omega(r)
-            sigr = math.sqrt(_sigma_r2_base(r, model))
-            vc = r * omega
-            dvr = 0.1 * sigr
-            vt = vc + (np.arange(1, 102) - 51) * dvr
-            d0 = _integrate_vphi(vt, pot, freq, rcirc_fn, spline_d, spline_sz, r, 0.0)
-            dz2 = _integrate_vphi(vt, pot, freq, rcirc_fn, spline_d, spline_sz, r, zdisk)
-            drat[ir] = min(d0 / max(rho0[ir], 1e-30), 1e6)
-            dz2rat[ir] = min(dz2 / max(rhoz[ir], 1e-30), 1e6)
+        if n_workers > 1 and len(active_idx) > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for ir, d0r, dz2r in pool.map(_radial_ratios, active_idx):
+                    drat[ir] = d0r
+                    dz2rat[ir] = dz2r
+        else:
+            for ir in active_idx:
+                ir2, d0r, dz2r = _radial_ratios(ir)
+                drat[ir2] = d0r
+                dz2rat[ir2] = dz2r
 
         ratio = np.maximum(drat / np.maximum(dz2rat, 1e-30), 1e-30)
         dens_ratio = np.maximum(rho0, 1e-30) / np.maximum(rhoz, 1e-30)

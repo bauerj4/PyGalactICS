@@ -30,7 +30,6 @@ from galacticsics.potential.poisson.integrals import (
 )
 from galacticsics.potential.poisson.sersic import (
     SersicParams,
-    sersic_d2rho_dpsi2,
     sersic_density,
     sersic_force,
     sersic_params_from_bulge,
@@ -339,43 +338,48 @@ def _spherical_total_at_radius(
     model: GalaxyModel,
     *,
     sersic: SersicParams | None,
+    hfr: np.ndarray | None = None,
+    ddens: np.ndarray | None = None,
+    dfr: np.ndarray | None = None,
+    bfr: np.ndarray | None = None,
 ) -> tuple[float, float]:
     """
     Combined spherical density and inward force for DF inversion.
 
-    Parameters
-    ----------
-    r : float
-        Spherical radius [kpc].
-    model : GalaxyModel
-        Galaxy configuration.
-    sersic : SersicParams or None
-        Bulge parameters when bulge is enabled.
-
-    Returns
-    -------
-    total_den : float
-        Combined mass density [kpc\\ :sup:`-3`].
-    total_force : float
-        Inward gravitational force magnitude.
+    When monopole force tables (``hfr``/``dfr``/``bfr``) are provided, forces
+    match the Poisson solve (same as the NFW Eddington path). Otherwise falls
+    back to analytic component forces.
     """
     total_den = 0.0
     total_force = 0.0
+    dr = model.grid.dr
+    nr = model.grid.nr
+    use_mono = hfr is not None and dfr is not None and bfr is not None
+
     halo = model.halo
     if halo is not None and halo.enabled and r > 0.0:
         total_den += halo_density_spherical(r, halo)
-        s = r / halo.a
-        haloconst = (2.0 ** (1.0 - halo.cusp)) * halo.v0**2 / (4.0 * math.pi * halo.a**2)
-        l2 = haloconst * halo.a * (s ** (1.0 - halo.cusp)) / ((1.0 + s) ** (2.0 - halo.cusp))
-        total_force += abs(-4.0 * math.pi * l2 / (r * r))
+        if use_mono:
+            total_force += abs(_interp_monopole_row(r, hfr, dr, nr))
+        else:
+            s = r / halo.a
+            haloconst = (2.0 ** (1.0 - halo.cusp)) * halo.v0**2 / (4.0 * math.pi * halo.a**2)
+            l2 = haloconst * halo.a * (s ** (1.0 - halo.cusp)) / ((1.0 + s) ** (2.0 - halo.cusp))
+            total_force += abs(-4.0 * math.pi * l2 / (r * r))
     if model.bulge is not None and model.bulge.enabled and sersic is not None:
         total_den += sersic_density(r, sersic)
-        total_force += abs(sersic_force(r, sersic))
+        if use_mono:
+            total_force += abs(_interp_monopole_row(r, bfr, dr, nr))
+        else:
+            total_force += abs(sersic_force(r, sersic))
     if model.disk is not None and model.disk.enabled and r > 0.0:
-        dd = integrated_disk_density_on_cylinder(r, model, ntheta=16)
-        total_den += dd
-        # Spherical approximation: M_enc ~ 4 pi int_0^r rho(r') r'^2 dr'
-        total_force += abs(4.0 * math.pi * dd / max(r, 1e-6))
+        if use_mono and ddens is not None:
+            total_den += _interp_monopole_row(r, ddens, dr, nr)
+            total_force += abs(_interp_monopole_row(r, dfr, dr, nr))
+        else:
+            dd = integrated_disk_density_on_cylinder(r, model, ntheta=16)
+            total_den += dd
+            total_force += abs(4.0 * math.pi * dd / max(r, 1e-6))
     return total_den, max(total_force, 1e-30)
 
 
@@ -475,6 +479,52 @@ def compute_nfw_df_table(
     return log_df
 
 
+def eddington_log_df_from_dens_psi(
+    energies: np.ndarray,
+    dens_psi: np.ndarray,
+    *,
+    psic: float,
+    nint: int = 64,
+) -> np.ndarray:
+    """
+    Eddington-invert ``rho(psi)`` via a spline ``d²ρ/dψ²`` quadrature.
+
+    The analytic chain-rule ``sersic_d2rho_dpsi2`` (force denominators) goes
+    negative near the centre for a Sersic embedded in a halo, and the old
+    ``last``-value floor then wrote a tiny flat ``f(E)`` over the most-bound
+    energies. Rejection sampling with ``fmax = f(ψ)`` then accepted near-escape
+    speeds in the inner bulge. Differentiating tabulated ``ρ(ψ)`` avoids that.
+    """
+    from scipy.interpolate import CubicSpline
+
+    order = np.argsort(np.asarray(energies, dtype=float))
+    e = np.asarray(energies, dtype=float)[order]
+    rho = np.maximum(np.asarray(dens_psi, dtype=float)[order], 0.0)
+    if len(e) < 4:
+        raise ValueError("eddington_log_df_from_dens_psi needs at least 4 energy nodes")
+    cs = CubicSpline(e, rho, bc_type="natural")
+    log_sorted = np.full(len(e), -50.0)
+    last = -50.0
+    nquad = max(int(nint), 32)
+    for i, energy in enumerate(e):
+        if energy <= psic:
+            log_sorted[i] = last
+            continue
+        tmax = math.sqrt(energy - psic)
+        ts = np.linspace(0.0, tmax, nquad)
+        d2 = np.asarray(cs(energy - ts * ts, 2), dtype=float)
+        # Spline ends can ring; Eddington requires a non-negative integrand.
+        d2 = np.maximum(d2, 0.0)
+        integ = float(np.trapezoid(2.0 * d2, ts))
+        df = integ / (math.sqrt(8.0) * math.pi**2)
+        if df > 0.0:
+            last = math.log(df)
+        log_sorted[i] = last
+    out = np.empty(len(e), dtype=float)
+    out[order] = log_sorted
+    return out
+
+
 def compute_sersic_df_table(
     energies: np.ndarray,
     model: GalaxyModel,
@@ -482,55 +532,48 @@ def compute_sersic_df_table(
     dpot: np.ndarray,
     bpot: np.ndarray,
     *,
+    hfr: np.ndarray | None = None,
+    ddens: np.ndarray | None = None,
+    dfr: np.ndarray | None = None,
+    bfr: np.ndarray | None = None,
     nint: int = 20,
     rmin: float = 0.001,
 ) -> np.ndarray:
     """
     Eddington-inverted bulge DF values (log stored like ``dfsersic.dat``).
 
+    Builds analytic Sersic ``ρ(ψ)`` on the energy grid, then inverts with
+    :func:`eddington_log_df_from_dens_psi` (not the unstable chain-rule
+    ``d²ρ/dψ²`` form).
+
     Returns
     -------
     log_df : ndarray, shape (npsi,)
         Natural logarithm of the bulge DF.
     """
+    del hfr, ddens, dfr, bfr  # densψ path does not need force tables
     halo = model.halo
     bulge = model.bulge
     assert halo is not None and bulge is not None
     dr = model.grid.dr
-    sersic = sersic_params_from_bulge(bulge)
     psic = _get_total_psi_estimate(halo.r_outer + 5.0 * halo.dr_trunc, hpot, dpot, bpot, dr)
-    log_df = np.zeros(len(energies), dtype=float)
-    last = -30.0
-    for i, energy in enumerate(energies):
-        if energy < psic:
-            log_df[i] = last
-            continue
-        tmax = math.sqrt(max(energy - psic, 0.0))
-        if tmax <= 0.0:
-            log_df[i] = last
-            continue
-        dt = tmax / max(nint - 1, 1)
-        rpsi = _invert_psi_to_radius(
-            energy, hpot, dpot, bpot, dr, rmin, halo.r_outer + halo.dr_trunc
-        )
-        total_den, total_force = _spherical_total_at_radius(rpsi, model, sersic=sersic)
-        d2 = sersic_d2rho_dpsi2(
-            rpsi, sersic, total_density=total_den, total_force=total_force
-        )
-        total = dt * d2
-        for j in range(1, nint - 1):
-            t = dt * j
-            psi_j = energy - t * t
-            r_j = _invert_psi_to_radius(
-                psi_j, hpot, dpot, bpot, dr, rmin, halo.r_outer + halo.dr_trunc
-            )
-            td, tf = _spherical_total_at_radius(r_j, model, sersic=sersic)
-            total += 2.0 * dt * sersic_d2rho_dpsi2(r_j, sersic, total_density=td, total_force=tf)
-        df = total / (math.sqrt(8.0) * math.pi**2)
-        if df > 0.0:
-            last = math.log(df)
-        log_df[i] = last
-    return log_df
+    rmax = float(halo.r_outer + halo.dr_trunc)
+    dens_psi = dens_psi_from_spherical_profile(
+        energies,
+        hpot,
+        dpot,
+        bpot,
+        dr=dr,
+        rmin=rmin,
+        rmax=rmax,
+        density_at_r=lambda r: float(
+            bulge_density_on_grid(np.asarray([max(r, 1e-6)]), bulge)[0]
+        ),
+        psic=psic,
+    )
+    return eddington_log_df_from_dens_psi(
+        energies, dens_psi, psic=psic, nint=max(2 * int(nint), 64)
+    )
 
 
 def df_interp(energy: float, energies: np.ndarray, log_df: np.ndarray) -> float:
@@ -563,6 +606,60 @@ def df_interp(energy: float, energies: np.ndarray, log_df: np.ndarray) -> float:
     frac = (energy - e[idx]) / (e[idx + 1] - e[idx])
     logv = ld[idx] + frac * (ld[idx + 1] - ld[idx])
     return math.exp(logv)
+
+
+def dens_psi_from_spherical_profile(
+    energies: np.ndarray,
+    hpot: np.ndarray,
+    dpot: np.ndarray,
+    bpot: np.ndarray,
+    *,
+    dr: float,
+    rmin: float,
+    rmax: float,
+    density_at_r: Callable[[float], float],
+    psic: float,
+) -> np.ndarray:
+    """
+    Map a spherical ``rho(r)`` onto the energy grid via monopole ``psi(r)``.
+
+    Prefer this over DF round-trip for Poisson ``denspsi*.dat`` when the
+    analytic profile is known: Eddington reconstruction can be 10–100× low
+    for the bulge while still producing a usable ``f(E)`` shape.
+    """
+    dens = np.zeros(len(energies), dtype=float)
+    for i, energy in enumerate(energies):
+        if energy < psic:
+            continue
+        r = _invert_psi_to_radius(energy, hpot, dpot, bpot, dr, rmin, rmax)
+        dens[i] = float(density_at_r(r))
+    return dens
+
+
+def renormalize_log_df_to_denspsi(
+    energies: np.ndarray,
+    log_df: np.ndarray,
+    dens_target: np.ndarray,
+    *,
+    psic: float,
+    fcut: float = 0.0,
+) -> np.ndarray:
+    """
+    Apply a constant scale to ``log_df`` so DF→ρ matches ``dens_target`` amplitude.
+
+    Multiplicative rescaling of ``f`` scales ``rho(psi)=∫f d³v`` by the same
+    factor. Shape of ``f(E)`` is preserved; only the overall amplitude is fixed.
+    """
+    recon = build_dens_psi_from_df(energies, log_df, psic=psic, fcut=fcut)
+    mask = (dens_target > 0.0) & (recon > 0.0) & (energies >= psic)
+    if not np.any(mask):
+        return log_df
+    ratios = dens_target[mask] / recon[mask]
+    # Median is robust to outer-energy noise.
+    scale = float(np.median(ratios))
+    if not math.isfinite(scale) or scale <= 0.0:
+        return log_df
+    return log_df + math.log(scale)
 
 
 def build_dens_psi_from_df(
@@ -727,16 +824,49 @@ def write_df_artifacts(
     dens_psi_bulge = None
     if model.bulge is not None and model.bulge.enabled:
         log_df_b = compute_sersic_df_table(
-            energies, model, hpot, dpot, bpot, nint=eff_nint
+            energies,
+            model,
+            hpot,
+            dpot,
+            bpot,
+            hfr=hfr,
+            ddens=ddens,
+            dfr=dfr,
+            bfr=bfr,
+            nint=eff_nint,
         )
-        dens_psi_bulge = build_dens_psi_from_df(energies, log_df_b, psic=psic, fcut=0.0)
+        # Poisson densψ: analytic Sersic ρ(r(ψ)) — DF round-trip underweights bulge.
+        rmin = max(0.001, dr)
+        rmax = float(model.halo.r_outer + model.halo.dr_trunc) if model.halo else float(nr * dr)
+        dens_psi_bulge = dens_psi_from_spherical_profile(
+            energies,
+            hpot,
+            dpot,
+            bpot,
+            dr=dr,
+            rmin=rmin,
+            rmax=rmax,
+            density_at_r=lambda r: float(
+                bulge_density_on_grid(np.array([max(r, 1e-6)]), model.bulge)[0]
+            ),
+            psic=psic,
+        )
+        # Rescale f(E) amplitude so velocity sampling matches analytic ρ.
+        log_df_b = renormalize_log_df_to_denspsi(
+            energies, log_df_b, dens_psi_bulge, psic=psic, fcut=0.0
+        )
         with (work_dir / "dfsersic.dat").open("w", encoding="utf-8") as f:
             for e, ld in zip(energies, log_df_b):
                 f.write(f"{e:.8E} {ld:.8E}\n")
         with (work_dir / "denspsibulge.dat").open("w", encoding="utf-8") as f:
             for e, rho in zip(energies, dens_psi_bulge):
                 f.write(f"{e:.8E} {rho:.8E}\n")
-
+        # Preserve ppp (not stored in legacy dbh.dat header) for genbulge.
+        b = model.bulge
+        (work_dir / "bulge_params.dat").write_text(
+            f"{b.n_sersic:.8E} {b.ppp:.8E} {b.v0:.8E} {b.a:.8E}\n",
+            encoding="utf-8",
+        )
     return psi0, psic, psid, energies, dens_psi_halo, dens_psi_bulge
 
 

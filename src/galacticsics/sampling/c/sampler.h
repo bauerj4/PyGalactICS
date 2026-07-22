@@ -56,6 +56,8 @@ typedef struct {
     int n;
     const double *energy;
     const double *log_df;
+    /* Optional running max of max(exp(log_df)-fcut,0) on ascending energy; NULL → f(ψ)-fcut. */
+    const double *fmax_cum;
     double psic;
     double fcut;
 } DfPack;
@@ -69,6 +71,14 @@ typedef struct {
 } HaloParams;
 
 typedef struct {
+    double n;     /* Sersic index */
+    double ppp;   /* inner slope */
+    double Re;    /* effective radius */
+    double butt;  /* truncation parameter */
+    double rho0;  /* central density normalization */
+} BulgeParams;
+
+typedef struct {
     int n_threads;
     int max_attempts;
     int center;
@@ -80,7 +90,9 @@ double sampler_rng_range(SamplerRng *rng, double lo, double hi);
 
 double pot_eval(const PotPack *pot, double s, double z);
 double halo_density_spherical(const HaloParams *h, double r);
+double sersic_density_spherical(const BulgeParams *b, double r);
 double df_eval(const DfPack *df, double psi);
+double df_fmax_at(const DfPack *df, double psi);
 
 double freq_omega(const FreqPack *f, double r);
 double freq_kappa(const FreqPack *f, double r);
@@ -129,6 +141,21 @@ int sample_disk_omp(
     const FreqPack *freq,
     const CorrPack *corr,
     const RcircPack *rcirc,
+    const SamplerOpts *opts
+);
+
+int sample_bulge_omp(
+    double *out, /* 7 * n_particles */
+    int n_particles,
+    int seed,
+    double mass,
+    double bulgeedge,
+    double wmax,
+    double wmin,
+    double streaming,
+    const PotPack *pot,
+    const BulgeParams *bulge,
+    const DfPack *df,
     const SamplerOpts *opts
 );
 

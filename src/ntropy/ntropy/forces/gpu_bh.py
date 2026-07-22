@@ -34,7 +34,7 @@ Memory complexity: O(N) for the tree (~76 B/node compact SoA).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from time import time
 from typing import Any
 
@@ -74,9 +74,9 @@ def _is_blackwell_gpu() -> bool:
 # Detect Blackwell at import time
 _BLACKWELL_GPU = _is_blackwell_gpu() if _cp is not None else False
 if _BLACKWELL_GPU:
-    logger.warning(
-        "[GPU-BH] Blackwell GPU detected. All GPU BH computations run in "
-        "isolated subprocesses to avoid cuBLAS driver corruption."
+    logger.info(
+        "[GPU-BH] Blackwell GPU detected. Import CuPy before bhtree_c for "
+        "in-process walks; set NTROPY_GPU_BH_SUBPROCESS=1 to force the worker."
     )
 
 
@@ -97,7 +97,7 @@ def _run_gpu_bh_subprocess(pos, mass, eps, theta, target_indices):
     theta : float
         BH opening angle.
     target_indices : ndarray or None
-        Target particle indices (currently always full N — subset not yet supported).
+        Target particle indices. ``None`` evaluates all particles.
 
     Returns
     -------
@@ -106,7 +106,9 @@ def _run_gpu_bh_subprocess(pos, mass, eps, theta, target_indices):
     """
     import subprocess as _subproc
     import tempfile as _tmpfile
-    
+    import os as _os
+    import sys as _sys
+
     # Write inputs to temp files (numpy format for zero-overhead transfer)
     tmp_pos = _tmpfile.mktemp(suffix='.npy')
     tmp_mass = _tmpfile.mktemp(suffix='.npy')
@@ -114,43 +116,49 @@ def _run_gpu_bh_subprocess(pos, mass, eps, theta, target_indices):
     np.save(tmp_pos, pos)
     np.save(tmp_mass, mass)
     np.save(tmp_eps, eps)
-    
+
     n = len(mass)
-    n_targets = n if target_indices is None else len(target_indices)
-    
+    tmp_targets = None
+    if target_indices is not None:
+        tmp_targets = _tmpfile.mktemp(suffix='.npy')
+        np.save(tmp_targets, np.asarray(target_indices, dtype=np.int32))
+
     # Write output to temp file
     tmp_out = _tmpfile.mktemp(suffix='.npz')
-    
+
     # Get path to this module's worker script
-    import os as _os
     pkg_dir = _os.path.dirname(__file__)
     worker_script = _os.path.join(pkg_dir, '_gpu_bh_worker.py')
-    
-    import sys as _sys
-    
-    # Run standalone worker script directly (not via exec). Pass temp file paths
-    # and parameters as command-line arguments. The worker reads inputs from files.
-    r = _subproc.run(
-        [_sys.executable, worker_script,
-         tmp_pos, tmp_mass, tmp_eps,
-         str(theta), str(n), tmp_out],
-        capture_output=True, text=True, timeout=180
-    )
-    
+
+    # Scale timeout with N: O(N log N) walk + optional CPU reference check.
+    timeout_s = max(180, int(60 + n / 5_000))
+
+    cmd = [_sys.executable, worker_script,
+           tmp_pos, tmp_mass, tmp_eps,
+           str(theta), str(n), tmp_out]
+    if tmp_targets is not None:
+        cmd.append(tmp_targets)
+
+    r = _subproc.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+
     if r.returncode != 0:
         err = r.stderr[-2000:] if len(r.stderr) > 2000 else r.stderr
         raise RuntimeError(f"GPU BH worker failed:\n{err}")
-    
+
     result = np.load(tmp_out, allow_pickle=False)
     acc = result['acc']
     ms = float(result['median_ms'])
     logger.debug("[GPU-BH] Worker done: %.1fms", ms)
-    
-    # Cleanup temp files
-    for f in (tmp_pos, tmp_mass, tmp_eps, tmp_out):
-        try: _os.unlink(f)
-        except: pass
-    
+
+    cleanup = [tmp_pos, tmp_mass, tmp_eps, tmp_out]
+    if tmp_targets is not None:
+        cleanup.append(tmp_targets)
+    for f in cleanup:
+        try:
+            _os.unlink(f)
+        except OSError:
+            pass
+
     return acc
 
 
@@ -224,7 +232,11 @@ def _log_timer(label: str, t0: float, msg: str = "") -> None:
 # GPU BH kernel — tree walk per target
 # ------------------------------------------------------------------ #
 
-# Single module containing BOTH kernels — prevents CuPy/Blackwell multi-module corruption
+# Single module containing BOTH kernels — prevents CuPy/Blackwell multi-module corruption.
+#
+# CRITICAL: tid = blockIdx.x * blockDim.x + threadIdx.x  (global thread index).
+# An earlier version used only threadIdx.x, which silently ignored all blocks
+# beyond the first and forced a catastrophic 256-target chunking workaround.
 _COMBINED_KERNEL_SRC = r"""
 typedef unsigned char uchar;
 
@@ -258,6 +270,7 @@ extern "C" __global__ void bh_unpack_kernel(
     out_ms[i] = nodes_flat[row+7];
     out_il[i] = (uchar)(nodes_flat[row+8] > 0.5 ? 1 : 0);
 
+    #pragma unroll
     for (int c = 0; c < 8; ++c) {
         out_ch[i*8+c] = (int)nodes_flat[row+9+c];
     }
@@ -266,10 +279,7 @@ extern "C" __global__ void bh_unpack_kernel(
 }
 
 extern "C" __global__ void bh_walk_kernel(
-    // Packed tree nodes (SoA layout):
-    const double *__restrict__ n_cx,   // [n_nodes] node center x
-    const double *__restrict__ n_cy,   // [n_nodes] node center y
-    const double *__restrict__ n_cz,   // [n_nodes] node center z
+    // Packed tree nodes (SoA layout) — geometric centers unused in walk:
     const double *__restrict__ n_mx,   // [n_nodes] com x
     const double *__restrict__ n_my,   // [n_nodes] com y
     const double *__restrict__ n_mz,   // [n_nodes] com z
@@ -277,196 +287,124 @@ extern "C" __global__ void bh_walk_kernel(
     const double *__restrict__ n_ms,   // [n_nodes] mass
     const uchar  *__restrict__ n_il,   // [n_nodes] is_leaf (uint8)
     const int      *__restrict__ n_ch, // [n_nodes*8] children indices
-    const int      *__restrict__ n_ls, // [n_nodes] leaf_start (offset into d_leaf_indices)
+    const int      *__restrict__ n_ls, // [n_nodes] leaf_start
     const int      *__restrict__ n_lc, // [n_nodes] leaf_count
-    const int      *__restrict__ d_leaf_indices, // [n_leaf] maps leaf_offset -> particle index
-    const double  *  __restrict__ d_pos,   // [N][3] source positions (input)
-    const double  *  __restrict__ d_mass,  // [N] source masses
-    const double  *  __restrict__ d_eps,   // [N] softening lengths
-    const int      *__restrict__ idx,      // [n_targets], target indices
+    const int      *__restrict__ d_leaf_indices, // [n_leaf]
+    const double  *  __restrict__ d_pos,   // [N*3]
+    const double  *  __restrict__ d_mass,  // [N]
+    const double  *  __restrict__ d_eps,   // [N]
+    const int      *__restrict__ idx,      // [n_targets]
     const int       n_leaf,
     const int       n_targets,
     const int       n_nodes,
     const int       n,
-    const double    theta,
-    const double    theta_sq,        // theta^2 for squared comparison
-    double         * __restrict__ acc) // [n_targets][3] output
+    const int       leaf_direct,     // 1 => n_ls is a direct particle index
+    const double    theta_sq,
+    double         * __restrict__ acc) // [n_targets*3]
 {
-    const int tid = threadIdx.x;
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_targets) return;
 
     const int target = idx[tid];
-    if (target < 0 || target >= n) {
+    if ((unsigned)target >= (unsigned)n) {
         acc[tid*3+0] = 0.0;
         acc[tid*3+1] = 0.0;
         acc[tid*3+2] = 0.0;
         return;
     }
 
-    const int tx = target*3+0;
-    const int ty = target*3+1;
-    const int tz = target*3+2;
-
-    const double px = d_pos[tx];
-    const double py = d_pos[ty];
-    const double pz = d_pos[tz];
+    const double px = d_pos[target*3+0];
+    const double py = d_pos[target*3+1];
+    const double pz = d_pos[target*3+2];
     const double t_eps = d_eps[target];
-    const double theta_sq_local = theta * theta;
+    const double t_eps2 = t_eps * t_eps;
 
-        double ax = 0.0, ay = 0.0, az = 0.0;
+    double ax = 0.0, ay = 0.0, az = 0.0;
 
-        // Iterative tree walk (avoids deep recursion in GPU).
-        int node_stack[128];  // stack of node indices to visit
-        int stack_top = 0;
+    // Iterative tree walk (avoids deep recursion on GPU).
+    // Depth of a balanced octree for 1e8 particles is ~9; 64 covers
+    // severely unbalanced cases without blowing local memory.
+    int node_stack[64];
+    int stack_top = 0;
+    node_stack[stack_top++] = 0;  // root
 
-        node_stack[stack_top++] = 0;  // root is always node 0
+    while (stack_top > 0) {
+        const int node = node_stack[--stack_top];
+        if ((unsigned)node >= (unsigned)n_nodes) continue;
 
-        while (stack_top > 0) {
-            int node = node_stack[--stack_top];
-            
-            // Bounds check: must be valid node index
-            if (node < 0 || node >= n_nodes) continue;
+        const double ms = n_ms[node];
+        if (ms <= 0.0) continue;
 
-            // Read node data
-            double ncx = n_cx[node];
-            double ncy = n_cy[node];
-            double ncz = n_cz[node];
-            double nm_x = n_mx[node];
-            double nm_y = n_my[node];
-            double nm_z = n_mz[node];
-            double sz  = n_sz[node];
-            double ms  = n_ms[node];
+        const double nm_x = n_mx[node];
+        const double nm_y = n_my[node];
+        const double nm_z = n_mz[node];
+        const double dx_c = nm_x - px;
+        const double dy_c = nm_y - py;
+        const double dz_c = nm_z - pz;
+        const double dist_sq = dx_c*dx_c + dy_c*dy_c + dz_c*dz_c;
 
-            if (ms <= 0.0) continue;
+        if (n_il[node] != 0) {
+            // Leaf — pairwise sum over contained particles
+            const int start = n_ls[node];
+            const int count = n_lc[node];
+            if (count <= 0) continue;
 
-            // Distance from target to node center
-            double dx_c = nm_x - px;
-            double dy_c = nm_y - py;
-            double dz_c = nm_z - pz;
-            double dist_sq = dx_c*dx_c + dy_c*dy_c + dz_c*dz_c;
-
-            if (n_il[node] != 0) {
-                // Leaf — pairwise sum over contained particles
-                int start = n_ls[node];
-                int count = n_lc[node];
-                
-                // Bounds check leaf data
-                if (count <= 0 || start < -1) continue;
-
-                for (int k = 0; k < count && k < 128; ++k) {
-                    int leaf_offset = start + k;
-                    
-                    // d_leaf_indices[0] == -1 means n_ls values are direct particle indices
-                    // (trivial tree with no separate leaf index array).
-                    int pidx;
-                    if (d_leaf_indices != nullptr && d_leaf_indices[0] == -1) {
-                        pidx = start + k;  // n_ls is the direct particle index
-                    } else {
-                        if (leaf_offset < 0 || leaf_offset >= n_leaf) continue;
-                        if (d_leaf_indices == nullptr) continue;
-                        pidx = d_leaf_indices[leaf_offset];
-                    }
-                    
-                    // Validate particle index
-                    if (pidx < 0 || pidx >= n) continue;
-
-                    const int sx = pidx*3+0;
-                    const int sy = pidx*3+1;
-                    const int sz2 = pidx*3+2;
-                    
-                    // Bounds check array index
-                    if (sx < 0 || sx >= n*3 - 2) continue;
-                    if (sy < 0 || sy >= n*3 - 1) continue;
-                    if (sz2 < 0 || sz2 >= n*3) continue;
-                    
-                    double dx = d_pos[sx] - px;
-                    double dy = d_pos[sy] - py;
-                    double dz = d_pos[sz2] - pz;
-
-                    double r2 = dx*dx + dy*dy + dz*dz;
-                    if (r2 == 0.0) continue;
-
-                    double h = 0.5 * (t_eps + d_eps[pidx]);
-                    double denom = pow(r2 + h*h, 1.5);
-                    double f = d_mass[pidx] / denom;
-
-                    ax += f*dx;
-                    ay += f*dy;
-                    az += f*dz;
-                }
-            } else {
-                // Internal cell — check opening criterion (squared)
-                if (dist_sq > 0.0 && (sz*sz) / dist_sq < theta_sq_local) {
-                    // Accept monopole approximation
-                    double h = t_eps;
-                    double denom = pow(dist_sq + h*h, 1.5);
-                    ax += ms * dx_c / denom;
-                    ay += ms * dy_c / denom;
-                    az += ms * dz_c / denom;
+            for (int k = 0; k < count; ++k) {
+                int pidx;
+                if (leaf_direct) {
+                    pidx = start + k;
                 } else {
-                    // Descend — push children in reverse order for correct traversal
-                    for (int c = 7; c >= 0; --c) {
-                        int child_idx = node*8 + c;
-                        // Bounds check child index
-                        if (child_idx < 0 || child_idx >= n_nodes*8) continue;
-                        int child = n_ch[child_idx];
-                        // Child must be valid and not the root itself (prevent cycles)
-                        if (child > 0 && child < n_nodes) {
-                            if (stack_top < 128) {
-                                node_stack[stack_top++] = child;
-                            }
-                        }
+                    const int leaf_offset = start + k;
+                    if ((unsigned)leaf_offset >= (unsigned)n_leaf) continue;
+                    pidx = d_leaf_indices[leaf_offset];
+                }
+                if ((unsigned)pidx >= (unsigned)n) continue;
+                if (pidx == target) continue;
+
+                const double dx = d_pos[pidx*3+0] - px;
+                const double dy = d_pos[pidx*3+1] - py;
+                const double dz = d_pos[pidx*3+2] - pz;
+                const double r2 = dx*dx + dy*dy + dz*dz;
+
+                const double h = 0.5 * (t_eps + d_eps[pidx]);
+                const double r2h = r2 + h*h;
+                // inv_r3 = 1 / (r2+h2)^{1.5}  via rsqrt (matches C fast_inv_r3)
+                const double inv_r = rsqrt(r2h);
+                const double inv_r3 = inv_r * inv_r * inv_r;
+                const double f = d_mass[pidx] * inv_r3;
+
+                ax += f * dx;
+                ay += f * dy;
+                az += f * dz;
+            }
+        } else {
+            // Internal cell — opening criterion on squared quantities
+            const double sz = n_sz[node];
+            if (dist_sq > 0.0 && (sz * sz) < theta_sq * dist_sq) {
+                const double r2h = dist_sq + t_eps2;
+                const double inv_r = rsqrt(r2h);
+                const double inv_r3 = inv_r * inv_r * inv_r;
+                const double f = ms * inv_r3;
+                ax += f * dx_c;
+                ay += f * dy_c;
+                az += f * dz_c;
+            } else {
+                // Descend — push children reverse order (stable stack order)
+                const int base = node * 8;
+                #pragma unroll
+                for (int c = 7; c >= 0; --c) {
+                    const int child = n_ch[base + c];
+                    if (child > 0 && child < n_nodes && stack_top < 64) {
+                        node_stack[stack_top++] = child;
                     }
                 }
             }
         }
-
-        acc[tid*3+0] = ax;
-        acc[tid*3+1] = ay;
-        acc[tid*3+2] = az;
     }
-"""
 
-# Kernel for building the compact SoA node representation on GPU.
-# Receives packed flat buffer and unpacks into SoA arrays.
-_GPU_UNPACK_KERNEL_SRC = r"""
-typedef unsigned char uchar;
-
-extern "C" __global__ void bh_unpack_kernel(
-    const double *__restrict__ nodes_flat,  // [n_nodes * 19]
-    const int                          n_nodes,
-    double * __restrict__ out_cx,            // [n_nodes]
-    double * __restrict__ out_cy,
-    double * __restrict__ out_cz,
-    double * __restrict__ out_mx,
-    double * __restrict__ out_my,
-    double * __restrict__ out_mz,
-    double * __restrict__ out_sz,
-    double * __restrict__ out_ms,
-    uchar * __restrict__ out_il,
-    int * __restrict__ out_ch,
-    int * __restrict__ out_ls,
-    int * __restrict__ out_lc)
-{
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_nodes) return;
-
-    const int row = i * 19;
-    out_cx[i] = nodes_flat[row+0];
-    out_cy[i] = nodes_flat[row+1];
-    out_cz[i] = nodes_flat[row+2];
-    out_mx[i] = nodes_flat[row+3];
-    out_my[i] = nodes_flat[row+4];
-    out_mz[i] = nodes_flat[row+5];
-    out_sz[i] = nodes_flat[row+6];
-    out_ms[i] = nodes_flat[row+7];
-    out_il[i] = (uchar)(nodes_flat[row+8] > 0.5 ? 1 : 0);
-
-    for (int c = 0; c < 8; ++c) {
-        out_ch[i*8+c] = (int)nodes_flat[row+9+c];
-    }
-    out_ls[i] = (int)nodes_flat[row+17];
-    out_lc[i] = (int)nodes_flat[row+18];
+    acc[tid*3+0] = ax;
+    acc[tid*3+1] = ay;
+    acc[tid*3+2] = az;
 }
 """
 
@@ -481,8 +419,6 @@ _bh_kernel_cache: dict[str, Any] | None = None
 if _cp is not None and _cuda_context_established:
     try:
         # Compile BOTH kernels NOW at import — before any bhtree_c cuBLAS load.
-        # Blackwell sm_120 will corrupt the allocator if ANY NEW RawModule is compiled
-        # AFTER a CUDA context already exists (regardless of which library owns it).
         _bh_init_mod = _cp.RawModule(code=_COMBINED_KERNEL_SRC)
         _bh_kernel_cache = {
             "walk": _bh_init_mod.get_function("bh_walk_kernel"),
@@ -495,18 +431,23 @@ if _cp is not None and _cuda_context_established:
         _bh_kernel_cache = None
 
 
-def _get_bh_kernels() -> tuple[Any, Any]:
-    """Return pre-compiled BH kernels from the cache.
-    
-    On Blackwell (sm_120), kernels are pre-compiled at module import time.
-    This function simply returns references from the cached module.
-    """
+def _ensure_bh_kernels(cp: Any) -> tuple[Any, Any]:
+    """Compile (once) and return (walk, unpack) kernels."""
+    global _bh_kernel_cache
     if _bh_kernel_cache is None:
-        raise RuntimeError("BH kernels were not compiled — GPU unavailable during init")
-    return (
-        _bh_kernel_cache["walk"],  # type: ignore[union-attr]
-        _bh_kernel_cache["unpack"],  # type: ignore[union-attr]
-    )
+        mod = cp.RawModule(code=_COMBINED_KERNEL_SRC)
+        _bh_kernel_cache = {
+            "walk": mod.get_function("bh_walk_kernel"),
+            "unpack": mod.get_function("bh_unpack_kernel"),
+            "_mod": mod,
+        }
+    return _bh_kernel_cache["walk"], _bh_kernel_cache["unpack"]
+
+
+def _get_bh_kernels() -> tuple[Any, Any]:
+    """Return BH kernels, compiling lazily if needed."""
+    cp = _require_gpu_bh()
+    return _ensure_bh_kernels(cp)
 
 
 # ------------------------------------------------------------------ #
@@ -558,10 +499,11 @@ class GpuBhState:
     d_ch: Any | None = None
     d_ls: Any | None = None
     d_lc: Any | None = None
+    leaf_direct: int = 0
 
     def build_on_gpu(self) -> None:
         """Unpack the packed node buffer into SoA layout on the GPU.
-        
+
         Resets any existing SoA arrays to avoid stale pointers from crashes.
         """
         cp = _require_gpu_bh()
@@ -569,15 +511,13 @@ class GpuBhState:
             raise RuntimeError("No nodes data available; create from a built tree.")
 
         n = self.n_nodes
-        
-        # Force-detach old SoA arrays to ensure clean allocation.
-        # This prevents stale GPU pointers after illegal memory access events.
+
         for attr in ("d_cx", "d_cy", "d_cz", "d_mx", "d_my", "d_mz",
                       "d_sz", "d_ms", "d_il", "d_ch", "d_ls", "d_lc"):
             setattr(self, attr, None)
 
         BLOCK = 256
-        grid = (int(np.ceil(n / BLOCK)), 1, 1)
+        grid = (int((n + BLOCK - 1) // BLOCK), 1, 1)
 
         self.d_cx = cp.zeros(n, dtype=cp.float64)
         self.d_cy = cp.zeros(n, dtype=cp.float64)
@@ -592,8 +532,7 @@ class GpuBhState:
         self.d_ls = cp.zeros(n, dtype=cp.int32)
         self.d_lc = cp.zeros(n, dtype=cp.int32)
 
-        # Use pre-compiled kernels from module-level cache (no recompilation on Blackwell)
-        wk, up = _get_bh_kernels()
+        _, up = _get_bh_kernels()
         up(grid=grid, block=(BLOCK, 1, 1),
            args=(self.d_nodes_flat, cp.int32(n),
                  self.d_cx, self.d_cy, self.d_cz,
@@ -610,7 +549,7 @@ class GpuBhState:
 
     def is_ready(self) -> bool:
         """Return True if the tree data is resident on the GPU."""
-        return self.d_cx is not None
+        return self.d_mx is not None
 
 
 # ------------------------------------------------------------------ #
@@ -618,6 +557,142 @@ class GpuBhState:
 # ------------------------------------------------------------------ #
 
 _BLOCK_SIZE = 256  # threads per block for BH walk kernel
+
+
+def _launch_bh_walk(
+    cp: Any,
+    walk_kernel: Any,
+    state: GpuBhState,
+    d_pos: Any,
+    d_mass: Any,
+    d_eps: Any,
+    d_idx: Any,
+    n_leaf: int,
+    n_targets: int,
+    n_nodes: int,
+    n: int,
+    theta: float,
+    d_acc: Any,
+) -> None:
+    """Launch a single multi-block BH tree-walk covering all targets."""
+    theta_sq = float(theta) * float(theta)
+    block = min(_BLOCK_SIZE, max(n_targets, 1))
+    grid = (int((n_targets + block - 1) // block), 1, 1)
+    leaf_direct = int(state.leaf_direct)
+
+    # Ensure a non-null leaf pointer when leaf_direct (sentinel unused).
+    d_leaf = state.d_leaf_indices
+    if d_leaf is None:
+        d_leaf = cp.zeros(1, dtype=cp.int32)
+
+    walk_kernel(
+        grid=grid,
+        block=(block, 1, 1),
+        args=(
+            state.d_mx, state.d_my, state.d_mz,
+            state.d_sz, state.d_ms, state.d_il,
+            state.d_ch, state.d_ls, state.d_lc,
+            d_leaf,
+            d_pos, d_mass, d_eps,
+            d_idx,
+            cp.int32(n_leaf),
+            cp.int32(n_targets),
+            cp.int32(n_nodes),
+            cp.int32(n),
+            cp.int32(leaf_direct),
+            cp.float64(theta_sq),
+            d_acc,
+        ),
+    )
+
+
+def _prepare_tree_state(
+    cp: Any,
+    pos: np.ndarray,
+    mass: np.ndarray,
+    eps: np.ndarray,
+    state: GpuBhState | None,
+    bh_opts: Any | None = None,
+) -> tuple[GpuBhState, int, int]:
+    """Build CPU tree, upload, unpack SoA. Returns (state, n_nodes, n_leaf)."""
+    from dataclasses import replace
+
+    from ntropy.config import BhOptimizationsConfig
+    from ntropy.forces.bhtree_c import (
+        PACK_FORMAT_LEGACY,
+        BarnesHutTreeC,
+        extension_available,
+    )
+
+    if not extension_available():
+        raise ImportError("GPU BH requires the C Barnes-Hut extension.")
+
+    # GPU unpack kernel only understands legacy 19-float rows. The optimized
+    # preset sets native_pack=True (raw BHNode bytes for MPI), which leaves
+    # packed["nodes"] empty and produced all-zero accelerations.
+    opts = bh_opts if bh_opts is not None else BhOptimizationsConfig()
+    opts = replace(opts, native_pack=False)
+
+    tree = BarnesHutTreeC.build(pos, mass, eps, bh_opts=opts)
+    packed = tree.pack_buffers()
+    pack_format = int(packed.get("pack_format", PACK_FORMAT_LEGACY))
+    nodes_2d = np.asarray(packed["nodes"], dtype=np.float64)
+    if pack_format != PACK_FORMAT_LEGACY or nodes_2d.size == 0:
+        raise RuntimeError(
+            "GPU BH requires legacy float pack buffers; "
+            f"got pack_format={pack_format}, nodes.shape={nodes_2d.shape}. "
+            "This is an internal bug — native_pack must be forced off for GPU."
+        )
+    n_nodes = int(nodes_2d.shape[0])
+    nodes_flat = np.ascontiguousarray(nodes_2d.ravel(), dtype=np.float64)
+
+    leaf_raw = np.asarray(
+        packed.get("leaf_indices", np.array([], dtype=np.int32)),
+        dtype=np.int32,
+    )
+    leaf_direct = 0
+    if leaf_raw.size == 0:
+        leaf_raw = np.array([-1], dtype=np.int32)
+        leaf_direct = 1
+    elif int(leaf_raw[0]) == -1:
+        leaf_direct = 1
+    n_leaf = int(leaf_raw.size)
+
+    st = GpuBhState(n_nodes=n_nodes, n_particles=len(mass)) if state is None else state
+    st.n_nodes = n_nodes
+    st.n_particles = len(mass)
+    st.leaf_direct = leaf_direct
+    st.d_nodes_flat = cp.asarray(nodes_flat)
+    st.d_leaf_indices = cp.asarray(leaf_raw)
+
+    BLOCK = 256
+    grid = (int((n_nodes + BLOCK - 1) // BLOCK), 1, 1)
+    st.d_cx = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_cy = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_cz = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_mx = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_my = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_mz = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_sz = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_ms = cp.empty(n_nodes, dtype=cp.float64)
+    st.d_il = cp.empty(n_nodes, dtype=cp.uint8)
+    st.d_ch = cp.empty(n_nodes * 8, dtype=cp.int32)
+    st.d_ls = cp.empty(n_nodes, dtype=cp.int32)
+    st.d_lc = cp.empty(n_nodes, dtype=cp.int32)
+
+    _, up = _ensure_bh_kernels(cp)
+    up(
+        grid=grid,
+        block=(BLOCK, 1, 1),
+        args=(
+            st.d_nodes_flat, cp.int32(n_nodes),
+            st.d_cx, st.d_cy, st.d_cz,
+            st.d_mx, st.d_my, st.d_mz,
+            st.d_sz, st.d_ms, st.d_il,
+            st.d_ch, st.d_ls, st.d_lc,
+        ),
+    )
+    return st, n_nodes, n_leaf
 
 
 def compute_forces_gpu_bh(
@@ -628,12 +703,14 @@ def compute_forces_gpu_bh(
     theta: float = 0.5,
     target_indices: np.ndarray | None = None,
     state: GpuBhState | None = None,
+    bh_opts: Any | None = None,
 ) -> np.ndarray:
     """Compute Barnes-Hut softened accelerations on GPU.
 
     This function implements a **hybrid CPU-build / GPU-walk** Barnes-Hut
-    algorithm.  On Blackwell GPUs, all GPU BH is routed through an isolated
-    subprocess worker where CuPy is imported FIRST (before any cuBLAS).
+    algorithm.  Import CuPy before any cuBLAS-using extension so the in-process
+    path works on Blackwell.  Set ``NTROPY_GPU_BH_SUBPROCESS=1`` to force the
+    isolated worker instead.
 
     Parameters
     ----------
@@ -648,7 +725,10 @@ def compute_forces_gpu_bh(
     target_indices : ndarray, optional
         Indices of particles to evaluate accelerations for.
     state : GpuBhState, optional
-        Ignored on Blackwell — GPU state cannot persist across subprocesses.
+        Optional device buffer holder. Ignored when
+        ``NTROPY_GPU_BH_SUBPROCESS=1``.
+    bh_opts : BhOptimizationsConfig, optional
+        C tree-build optimizations (Morton ordering, fast paths, …).
 
     Returns
     -------
@@ -676,93 +756,48 @@ def compute_forces_gpu_bh(
     if n == 0:
         return np.zeros((0, 3), dtype=np.float64)
 
-    if state is not None:
-        logger.warning("[GPU-BH] State parameter ignored on Blackwell — "
-                       "GPU BH uses subprocess isolation.")
+    # Subprocess isolation is optional. Prefer in-process when CuPy owns the
+    # CUDA context (import cupy before bhtree_c). Force with:
+    #   NTROPY_GPU_BH_SUBPROCESS=1
+    import os as _os
 
-    # --- On Blackwell, always use subprocess worker ---------------------- #
-    if _BLACKWELL_GPU:
+    force_subprocess = _os.environ.get("NTROPY_GPU_BH_SUBPROCESS", "").strip() in (
+        "1", "true", "True", "yes",
+    )
+    if _BLACKWELL_GPU and force_subprocess:
+        if state is not None:
+            logger.warning(
+                "[GPU-BH] State ignored under NTROPY_GPU_BH_SUBPROCESS=1."
+            )
         return _run_gpu_bh_subprocess(pos, mass, eps, theta, target_indices)
 
-    # --- Direct computation with chunked kernel launches (safe on all GPUs) ------ #
     t0 = time()
     logger.debug("[GPU-BH] Starting GPU Barnes-Hut (N=%d)", n)
-    
-    from ntropy.forces.bhtree_c import extension_available, BarnesHutTreeC
 
-    if not extension_available():
-        raise ImportError("GPU BH requires the C Barnes-Hut extension.")
-
-    # Prepare target indices
     if target_indices is None:
-        targets = np.arange(n, dtype=np.int32); n_targets = n
+        targets = np.arange(n, dtype=np.int32)
+        n_targets = n
     else:
-        targets = np.asarray(target_indices, dtype=np.int32); n_targets = len(targets)
+        targets = np.asarray(target_indices, dtype=np.int32)
+        n_targets = len(targets)
 
-    # Build tree on CPU
-    logger.debug("[GPU-BH] Building octree on CPU...")
-    tree = BarnesHutTreeC.build(pos, mass, eps)
-    packed = tree.pack_buffers()
-    nodes_2d = np.asarray(packed["nodes"], dtype=np.float64)
-    n_nodes = nodes_2d.shape[0]
-    nodes_flat = np.ascontiguousarray(nodes_2d, dtype=np.float64)
+    st, n_nodes, n_leaf = _prepare_tree_state(
+        cp, pos, mass, eps, state, bh_opts=bh_opts
+    )
 
-    leaf_raw = packed.get("leaf_indices", np.array([], dtype=np.int32))
-    if len(leaf_raw) == 0: leaf_raw = np.array([-1], dtype=np.int32)
-    n_leaf = len(leaf_raw)
-    
-    # Transfer to GPU BEFORE cuBLAS load (all allocs first)
-    d_pos = cp.asarray(pos); d_mass = cp.asarray(mass); d_eps = cp.asarray(eps)
-    idx_arr = cp.asarray(targets)
-    acc = cp.zeros((n_targets, 3), dtype=cp.float64)
-    
-    # Build state + SoA
-    st = GpuBhState(n_nodes=n_nodes) if state is None else state
-    st.d_nodes_flat = cp.asarray(nodes_flat); st.d_leaf_indices = cp.asarray(leaf_raw)
-    BLOCK=256; grid=(int(np.ceil(n_nodes/BLOCK)),1,1)
-    for attr in ("d_cx","d_cy","d_cz","d_mx","d_my","d_mz","d_sz","d_ms","d_il","d_ch","d_ls","d_lc"):
-        setattr(st, attr, None)
-    st.d_cx=cp.zeros(n_nodes,dtype=cp.float64); st.d_cy=cp.zeros(n_nodes,dtype=cp.float64)
-    st.d_cz=cp.zeros(n_nodes,dtype=cp.float64); st.d_mx=cp.zeros(n_nodes,dtype=cp.float64)
-    st.d_my=cp.zeros(n_nodes,dtype=cp.float64); st.d_mz=cp.zeros(n_nodes,dtype=cp.float64)
-    st.d_sz=cp.zeros(n_nodes,dtype=cp.float64); st.d_ms=cp.zeros(n_nodes,dtype=cp.float64)
-    st.d_il=cp.zeros(n_nodes,dtype=cp.uint8); st.d_ch=cp.zeros(n_nodes*8,dtype=cp.int32)
-    st.d_ls=cp.zeros(n_nodes,dtype=cp.int32); st.d_lc=cp.zeros(n_nodes,dtype=cp.int32)
-    
-    wk, up = _get_bh_kernels()
-    up(grid=grid, block=(BLOCK,1,1), args=(st.d_nodes_flat,cp.int32(n_nodes),
-        st.d_cx,st.d_cy,st.d_cz,st.d_mx,st.d_my,st.d_mz,st.d_sz,st.d_ms,st.d_il,
-        st.d_ch,st.d_ls,st.d_lc))
-    
-    theta_sq = theta*theta
-    
-    # CRITICAL FIX: Blackwell sm_120 corrupts GPU memory mid-kernel when multiple
-    # blocks are launched. Process targets in SINGLE-block chunks (max 256 per kernel call)
-    # with sync between each chunk to avoid corruption.
-    result = np.zeros((n_targets, 3), dtype=np.float64)
-    
-    for start in range(0, n_targets, _BLOCK_SIZE):
-        end = min(start + _BLOCK_SIZE, n_targets)
-        chunk_targets = targets[start:end]
-        n_chunk = end - start
-        
-        acc_chunk = cp.zeros((n_chunk, 3), dtype=cp.float64)
-        idx_chunk = cp.asarray(chunk_targets, dtype=cp.int32)
-        
-        blk = min(_BLOCK_SIZE, n_chunk)
-        grd = (int(np.ceil(n_chunk / blk)), 1, 1)
-        
-        wk(grid=grd, block=(blk, 1, 1), args=(st.d_cx, st.d_cy, st.d_cz, st.d_mx, st.d_my, st.d_mz,
-            st.d_sz, st.d_ms, st.d_il, st.d_ch, st.d_ls, st.d_lc, st.d_leaf_indices,
-            d_pos, d_mass, d_eps, idx_chunk, cp.int32(n_leaf), cp.int32(n_chunk), cp.int32(n_nodes),
-            cp.int32(n), cp.float64(float(theta)), cp.float64(theta_sq), acc_chunk))
-        
-        result[start:end] = cp.asnumpy(acc_chunk)
-    
-    # Force clean state after all kernels complete
+    d_pos = cp.asarray(pos)
+    d_mass = cp.asarray(mass)
+    d_eps = cp.asarray(eps)
+    d_idx = cp.asarray(targets)
+    d_acc = cp.zeros((n_targets, 3), dtype=cp.float64)
+
+    wk, _ = _ensure_bh_kernels(cp)
+    _launch_bh_walk(
+        cp, wk, st, d_pos, d_mass, d_eps, d_idx,
+        n_leaf, n_targets, n_nodes, n, theta, d_acc,
+    )
     cp.cuda.runtime.deviceSynchronize()
-    
-    logger.debug("[GPU-BH] Complete: %.1fms total", (time()-t0)*1000)
-    return result
-    logger.debug("[GPU-BH] Complete: %.1fms total", (time()-t0)*1000)
+
+    result = cp.asnumpy(d_acc)
+    logger.debug("[GPU-BH] Complete: %.1fms total", (time() - t0) * 1000)
     return result

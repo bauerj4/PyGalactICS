@@ -324,7 +324,21 @@ class TestAvailability:
     def test_gpu_bh_available_returns_bool(self):
         result = gpu_bh_available()
         assert isinstance(result, bool)
-        assert result is True
+
+    def test_gpu_bh_optimized_preset_not_zero(self):
+        """optimized preset must not empty the GPU pack (native_pack forced off)."""
+        from ntropy.config import BhOptimizationsConfig
+
+        rng = np.random.default_rng(0)
+        n = 2048
+        pos = rng.normal(size=(n, 3))
+        mass = np.full(n, 1.0 / n)
+        eps = np.full(n, 0.05)
+        opts = BhOptimizationsConfig.from_preset("optimized")
+        acc = compute_forces_gpu_bh(pos, mass, eps, theta=0.5, bh_opts=opts)
+        amag = np.linalg.norm(acc, axis=1)
+        assert amag.mean() > 0.0
+        assert int((amag == 0).sum()) == 0
 
     def test_gpu_direct_raises_without_gpu(self):
         """compute_forces_gpu raises ImportError when GPU unavailable."""

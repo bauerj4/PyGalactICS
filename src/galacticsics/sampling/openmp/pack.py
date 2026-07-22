@@ -193,6 +193,84 @@ def pack_disk_context(work_dir: Path) -> dict:
     return ctx
 
 
+def pack_bulge_context(work_dir: Path) -> dict:
+    """Pack tables for OpenMP ``genbulge`` (spherical Sersic + ``dfsersic.dat``)."""
+    from galacticsics.models import SersicBulge
+    from galacticsics.potential.poisson.sersic import (
+        bulge_density_spherical,
+        sersic_params_from_bulge,
+    )
+
+    work_dir = Path(work_dir)
+    pot = read_harmonic_potential(work_dir / "dbh.dat")
+    masses = (work_dir / "mr.dat").read_text().splitlines()
+    bulgemass = float(masses[1].split()[0])
+    bulgeedge = float(masses[1].split()[1])
+    bulge = pot.model.bulge
+    params_path = work_dir / "bulge_params.dat"
+    if params_path.is_file():
+        nnn, ppp, v0b, ab = (float(x) for x in params_path.read_text().split()[:4])
+        bulge = SersicBulge(n_sersic=nnn, ppp=ppp, v0=v0b, a=ab, enabled=True)
+    if bulge is None or not bulge.enabled:
+        raise ValueError("bulge component missing")
+    if bulgemass <= 0.0 or bulgeedge <= 0.0:
+        bulgemass = max(bulgemass, bulge.v0**2 * bulge.a)
+        bulgeedge = max(bulgeedge, 3.0 * bulge.a)
+
+    energies = []
+    log_df = []
+    for line in (work_dir / "dfsersic.dat").read_text().splitlines():
+        e, ld = line.split()[:2]
+        energies.append(float(e))
+        log_df.append(float(ld))
+    energies_arr = np.asarray(energies, dtype=np.float64)
+    log_df_arr = np.asarray(log_df, dtype=np.float64)
+    order = np.argsort(energies_arr)
+    energies_arr = np.ascontiguousarray(energies_arr[order])
+    log_df_arr = np.ascontiguousarray(log_df_arr[order])
+    log_interp = interp1d(
+        energies_arr,
+        log_df_arr,
+        kind="linear",
+        bounds_error=False,
+        fill_value=(float(log_df_arr[0]), float(log_df_arr[-1])),
+        assume_sorted=True,
+    )
+    fcut = float(np.exp(log_interp(pot.psic)))
+    f_sorted = np.maximum(np.exp(log_df_arr) - fcut, 0.0)
+    fmax_cum = np.ascontiguousarray(np.maximum.accumulate(f_sorted), dtype=np.float64)
+
+    params = sersic_params_from_bulge(bulge)
+    n_r = max(64, int(bulgeedge / max(bulge.a, 0.05) * 20))
+    r_grid = np.linspace(0.0, bulgeedge, n_r)
+    weight = np.array(
+        [bulge_density_spherical(float(r), bulge, params) * r * r for r in r_grid],
+        dtype=float,
+    )
+    wmax = float(weight.max()) * 1.5 if weight.size else 0.0
+    wmin = 1e-10 * wmax if wmax > 0.0 else 0.0
+
+    ctx = pack_potential(pot)
+    ctx.update(
+        {
+            "bulge_n": float(params.n),
+            "bulge_ppp": float(params.ppp),
+            "bulge_Re": float(params.Re),
+            "bulge_butt": float(params.butt),
+            "bulge_rho0": float(params.rho0),
+            "df_energy": energies_arr,
+            "df_log_df": log_df_arr,
+            "df_fmax_cum": fmax_cum,
+            "df_fcut": fcut,
+            "bulgemass": bulgemass,
+            "bulgeedge": bulgeedge,
+            "wmax": wmax,
+            "wmin": wmin,
+        }
+    )
+    return ctx
+
+
 def flat_to_particle_dtype(flat: np.ndarray, n_particles: int) -> np.ndarray:
     from galacticsics.sampling.particles import PARTICLE_DTYPE
 

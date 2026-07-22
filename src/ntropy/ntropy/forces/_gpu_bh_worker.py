@@ -6,11 +6,9 @@ module or cuBLAS loading. This is critical on NVIDIA Blackwell (sm_120) GPUs whe
 loading the BarnesHutTreeC C extension corrupts the CUDA driver state for all
 subsequent child processes.
 
-On Blackwell, the GPU Barnes-Hut kernel suffers from a second corruption issue:
-multi-block kernel launches corrupt GPU memory mid-kernel, causing only the first
-block (threads 0-255) to compute correctly — all remaining threads produce zeroed
-results. The fix: process targets in single-block chunks of at most 256 threads,
-with `cudaDeviceSynchronize()` between each chunk.
+The tree-walk kernel uses a proper global thread index
+(``blockIdx.x * blockDim.x + threadIdx.x``) so a single multi-block launch covers
+all targets — essential for scaling into the millions of particles.
 
 Command-Line Arguments
 ----------------------
@@ -26,53 +24,33 @@ n : str
     Number of particles (integer).
 tmp_out : str
     Path to output .npz file for results.
+tmp_targets : str, optional
+    Path to .npy file of int32 target indices. If omitted, all N particles
+    are evaluated.
 
 Output (.npz)
 -------------
-acc : ndarray, shape (N, 3)
+acc : ndarray, shape (N_targets, 3)
     Computed accelerations in code units [kpc / (100 km/s)^2].
 median_ms : float
-    Median wall time over 10 GPU kernel calls (in milliseconds).
+    Median wall time over timed GPU kernel calls (in milliseconds).
 norm : float
     L2 norm of the acceleration vector.
 rel_err : float
-    Relative error vs C BarnesHutTreeC reference (computed inside worker,
-    before any cuBLAS corruption can affect measurements).
-
-Notes
------
-This module is designed exclusively for execution via subprocess.run(), NOT
-for import as a Python module. It must be run as a standalone script because:
-
-1. CuPy must be the FIRST CUDA library imported to establish the device/pinned
-   memory pools before cuBLAS loads (prevents Blackwell sm_120 driver corruption).
-2. The accuracy measurement is computed inside this worker while CuPy owns the
-   allocator — comparing GPU results vs C reference in the same process context.
-3. On Blackwell GPUs, _BLOCK_SIZE = 256 limits each kernel to a single block,
-   with deviceSynchronize() between blocks to prevent mid-kernel memory corruption.
-
-Examples
---------
-Execute via subprocess from a parent script:
-
->>> import subprocess as sp
->>> sp.run([python_exe, worker_script, pos_path, mass_path, eps_path,
-...        "0.5", "1000", "/tmp/out.npz"], capture_output=True)
-
-References
-----------
-.. [1] Barnes, J. & Hut, P. (1986), "A hierarchical O(n*log(n)) force
-       calculation algorithm", Nature, 324, 446-449.
+    Relative error vs C BarnesHutTreeC reference (``-1`` when skipped for large N).
 """
-import sys, time, numpy as np
+import sys
+import time
+
+import numpy as np
 
 # CRITICAL: Import CuPy FIRST — before ANY PyGalactICS module or cuBLAS
 import cupy as cp
 
 # Force CuPy context + pinned pool BEFORE anything else CUDA-related
-cp.cuda.runtime.setDevice(0)  # Use GPU 0
-_ = cp.zeros(1024, dtype=cp.float32)  # Allocate in device pool
-_ = cp.array([1.0], dtype=cp.float64)  # Allocate in pinned pool
+cp.cuda.runtime.setDevice(0)
+_ = cp.zeros(1024, dtype=cp.float32)
+_ = cp.array([1.0], dtype=cp.float64)
 cp.cuda.runtime.deviceSynchronize()
 
 # Parse args
@@ -82,133 +60,83 @@ tmp_eps = sys.argv[3]
 theta = float(sys.argv[4])
 n = int(sys.argv[5])
 tmp_out = sys.argv[6]
+tmp_targets = sys.argv[7] if len(sys.argv) > 7 else None
 
 pos = np.load(tmp_pos).astype(np.float64)
 mass = np.load(tmp_mass).astype(np.float64)
 eps = np.load(tmp_eps).astype(np.float64)
 
-# Use internal direct GPU BH path — NOT compute_forces_gpu_bh to avoid Blackwell recursion
-from ntropy.forces.gpu_bh import (
-    GpuBhState, _require_gpu_bh, _BLOCK_SIZE,
-    _COMBINED_KERNEL_SRC
+if tmp_targets is not None:
+    targets = np.load(tmp_targets).astype(np.int32)
+else:
+    targets = np.arange(n, dtype=np.int32)
+n_targets = int(targets.size)
+
+from ntropy.forces.gpu_bh import (  # noqa: E402
+    _ensure_bh_kernels,
+    _launch_bh_walk,
+    _prepare_tree_state,
+    _require_gpu_bh,
 )
 
-# Build tree on CPU with bhtree_c (safe in subprocess since CuPy was imported first)
-from ntropy.forces.bhtree_c import BarnesHutTreeC
-
-tree = BarnesHutTreeC.build(pos, mass, eps)
-packed = tree.pack_buffers()
-nodes_2d = np.asarray(packed["nodes"], dtype=np.float64)
-n_nodes = nodes_2d.shape[0]
-nodes_flat = np.ascontiguousarray(nodes_2d, dtype=np.float64)
-
-leaf_raw = packed.get("leaf_indices", np.array([], dtype=np.int32))
-if len(leaf_raw) == 0:
-    leaf_raw = np.array([-1], dtype=np.int32)
-n_leaf = len(leaf_raw)
-
-# Prepare GPU state (no subprocess recursion — direct computation here)
-state = GpuBhState(n_nodes=n_nodes, n_particles=n)
 cp = _require_gpu_bh()
+_ensure_bh_kernels(cp)  # compile once up front
 
-state.d_nodes_flat = cp.asarray(nodes_flat)
-state.d_leaf_indices = cp.asarray(leaf_raw) if n_leaf > 0 else None
+# Build tree on CPU (safe here: CuPy imported first), upload + unpack SoA
+state, n_nodes, n_leaf = _prepare_tree_state(cp, pos, mass, eps, state=None)
 
-# COMPILE kernels NOW in worker (CuPy context exists at this point)
-_mod = cp.RawModule(code=_COMBINED_KERNEL_SRC)
-wk = _mod.get_function("bh_walk_kernel")
-up = _mod.get_function("bh_unpack_kernel")
-
-# Build SoA
-BLOCK = 256
-grid_soa = (int(np.ceil(n_nodes / BLOCK)), 1, 1)
-state.d_cx = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_cy = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_cz = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_mx = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_my = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_mz = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_sz = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_ms = cp.zeros(n_nodes, dtype=cp.float64)
-state.d_il = cp.zeros(n_nodes, dtype=cp.uint8)
-state.d_ch = cp.zeros(n_nodes * 8, dtype=cp.int32)
-state.d_ls = cp.zeros(n_nodes, dtype=cp.int32)
-state.d_lc = cp.zeros(n_nodes, dtype=cp.int32)
-
-# Unpack tree nodes into SoA layout on GPU
-up(grid=grid_soa, block=(BLOCK, 1, 1),
-   args=(state.d_nodes_flat, cp.int32(n_nodes),
-         state.d_cx, state.d_cy, state.d_cz,
-         state.d_mx, state.d_my, state.d_mz,
-         state.d_sz, state.d_ms, state.d_il,
-         state.d_ch, state.d_ls, state.d_lc))
-
-# Particle data on GPU
 d_pos = cp.asarray(pos)
 d_mass = cp.asarray(mass)
 d_eps = cp.asarray(eps)
-idx_arr = cp.arange(n, dtype=cp.int32)
-acc = cp.zeros((n, 3), dtype=cp.float64)
+d_idx = cp.asarray(targets)
+d_acc = cp.zeros((n_targets, 3), dtype=cp.float64)
 
-# Warmup (5 calls) — build state on GPU
-for _ in range(5):
-    # Reuse SoA from previous call (state already built)
-    pass
+wk, _ = _ensure_bh_kernels(cp)
 
-# CRITICAL FIX: Process targets in chunks of 256 to avoid mid-kernel corruption on Blackwell sm_120
-# Each chunk launches a single kernel block — no multi-block issues
+# Warmup — one full multi-block walk
+_launch_bh_walk(
+    cp, wk, state, d_pos, d_mass, d_eps, d_idx,
+    n_leaf, n_targets, n_nodes, n, theta, d_acc,
+)
+cp.cuda.runtime.deviceSynchronize()
+
+# Adaptive timing budget: fewer repeats at large N (kernel dominates)
+if n >= 1_000_000:
+    n_runs = 3
+elif n >= 200_000:
+    n_runs = 5
+else:
+    n_runs = 10
+
 times = []
-acc_last_full = np.zeros((n, 3), dtype=np.float64)
-
-for run in range(10):
+for _ in range(n_runs):
     t0 = time.perf_counter()
-    
-    theta_sq = theta * theta
-    
-    # Process all targets in single-block chunks
-    for start in range(0, n, _BLOCK_SIZE):
-        end = min(start + _BLOCK_SIZE, n)
-        chunk_targets = np.arange(start, end, dtype=np.int32)
-        n_chunk = end - start
-        
-        acc_chunk = cp.zeros((n_chunk, 3), dtype=cp.float64)
-        idx_chunk = cp.asarray(chunk_targets, dtype=np.int32)
-        
-        blk = min(_BLOCK_SIZE, n_chunk)
-        grd = (int(np.ceil(n_chunk / blk)), 1, 1)
-        
-        wk(grid=grd, block=(blk, 1, 1), args=(
-            state.d_cx, state.d_cy, state.d_cz,
-            state.d_mx, state.d_my, state.d_mz,
-            state.d_sz, state.d_ms, state.d_il,
-            state.d_ch, state.d_ls, state.d_lc,
-            state.d_leaf_indices,
-            d_pos, d_mass, d_eps,
-            idx_chunk, cp.int32(n_leaf), cp.int32(n_chunk), cp.int32(n_nodes),
-            cp.int32(n), cp.float64(float(theta)), cp.float64(theta_sq), acc_chunk))
-        
-        # Sync after each chunk to prevent corruption
-        cp.cuda.runtime.deviceSynchronize()
-        
-        acc_last_full[start:end] = cp.asnumpy(acc_chunk)
-    
-    ms = (time.perf_counter() - t0) * 1e3
-    times.append(ms)
+    _launch_bh_walk(
+        cp, wk, state, d_pos, d_mass, d_eps, d_idx,
+        n_leaf, n_targets, n_nodes, n, theta, d_acc,
+    )
+    cp.cuda.runtime.deviceSynchronize()
+    times.append((time.perf_counter() - t0) * 1e3)
 
-acc_last = acc_last_full
-
+acc_last = cp.asnumpy(d_acc)
 median_ms = float(np.median(times))
 norm = float(np.linalg.norm(acc_last))
 
-# Compute accuracy vs C reference INSIDE the worker (before any cuBLAS corruption)
-from ntropy.forces.bhtree_c import compute_forces_bh_c as cfbc_ref
-ref_acc = cfbc_ref(pos, mass, eps, theta=theta)
-ref_norm = float(np.linalg.norm(ref_acc))
-rel_err = float(np.linalg.norm(acc_last - ref_acc) / ref_norm) if ref_norm > 0 else -1.0
+# Full C reference is O(N log N) on CPU and dominates wall time at large N.
+# Keep machine-epsilon checks for the validated small/medium regime only.
+rel_err = -1.0
+if n <= 100_000 and n_targets == n:
+    from ntropy.forces.bhtree_c import compute_forces_bh_c as cfbc_ref
 
-# Write results to output file (includes accuracy from INSIDE the worker)
-np.savez(tmp_out,
-         acc=acc_last,
-         median_ms=np.float64(median_ms),
-         norm=np.float64(norm),
-         rel_err=np.float64(rel_err))
+    ref_acc = cfbc_ref(pos, mass, eps, theta=theta)
+    ref_norm = float(np.linalg.norm(ref_acc))
+    if ref_norm > 0:
+        rel_err = float(np.linalg.norm(acc_last - ref_acc) / ref_norm)
+
+np.savez(
+    tmp_out,
+    acc=acc_last,
+    median_ms=np.float64(median_ms),
+    norm=np.float64(norm),
+    rel_err=np.float64(rel_err),
+)

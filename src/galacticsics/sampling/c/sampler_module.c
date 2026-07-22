@@ -145,6 +145,7 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     df.n = (int)PyArray_DIM(df_energy, 0);
     df.energy = (const double *)PyArray_DATA(df_energy);
     df.log_df = (const double *)PyArray_DATA(df_log);
+    df.fmax_cum = NULL;
 
     npy_intp dims[1] = {(npy_intp)(n_particles * 7)};
     PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(1, dims, NPY_FLOAT64);
@@ -274,10 +275,97 @@ static PyObject *py_sample_disk(PyObject *self, PyObject *args, PyObject *kwargs
     return (PyObject *)out;
 }
 
+static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    static char *kwlist[] = {
+        "pack", "n_particles", "seed", "mass", "bulgeedge", "wmax", "wmin",
+        "streaming", "n_threads", "max_attempts", "center", NULL
+    };
+    PyObject *pack_obj = NULL;
+    int n_particles = 0, seed = -1, n_threads = 0, max_attempts = 0, center = 1;
+    double mass = 0, bulgeedge = 0, wmax = 0, wmin = 0, streaming = 0.5;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "Oiidddddiii", kwlist,
+            &pack_obj, &n_particles, &seed, &mass, &bulgeedge, &wmax, &wmin,
+            &streaming, &n_threads, &max_attempts, &center)) {
+        return NULL;
+    }
+    if (!PyDict_Check(pack_obj)) {
+        PyErr_SetString(PyExc_TypeError, "pack must be a dict");
+        return NULL;
+    }
+
+    PotPack pot = {0};
+    BulgeParams bulge = {0};
+    DfPack df = {0};
+    PyArrayObject *apot_arr = NULL;
+    PyArrayObject *plcon_arr = NULL;
+    if (fill_pot_pack(pack_obj, &pot, &apot_arr, &plcon_arr) < 0) {
+        return NULL;
+    }
+    if (get_required_double(pack_obj, "bulge_n", &bulge.n) < 0
+        || get_required_double(pack_obj, "bulge_ppp", &bulge.ppp) < 0
+        || get_required_double(pack_obj, "bulge_Re", &bulge.Re) < 0
+        || get_required_double(pack_obj, "bulge_butt", &bulge.butt) < 0
+        || get_required_double(pack_obj, "bulge_rho0", &bulge.rho0) < 0
+        || get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
+        Py_DECREF(apot_arr);
+        Py_DECREF(plcon_arr);
+        return NULL;
+    }
+    df.psic = pot.psic;
+
+    PyArrayObject *df_energy = get_required_array(pack_obj, "df_energy", 1);
+    PyArrayObject *df_log = get_required_array(pack_obj, "df_log_df", 1);
+    PyArrayObject *df_fmax = get_required_array(pack_obj, "df_fmax_cum", 1);
+    if (!df_energy || !df_log || !df_fmax) {
+        Py_XDECREF(df_energy);
+        Py_XDECREF(df_log);
+        Py_XDECREF(df_fmax);
+        Py_DECREF(apot_arr);
+        Py_DECREF(plcon_arr);
+        return NULL;
+    }
+    df.n = (int)PyArray_DIM(df_energy, 0);
+    df.energy = (const double *)PyArray_DATA(df_energy);
+    df.log_df = (const double *)PyArray_DATA(df_log);
+    df.fmax_cum = (const double *)PyArray_DATA(df_fmax);
+
+    npy_intp dims[1] = {(npy_intp)(n_particles * 7)};
+    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(1, dims, NPY_FLOAT64);
+    if (!out) {
+        Py_DECREF(df_energy);
+        Py_DECREF(df_log);
+        Py_DECREF(df_fmax);
+        Py_DECREF(apot_arr);
+        Py_DECREF(plcon_arr);
+        return NULL;
+    }
+
+    SamplerOpts opts = {.n_threads = n_threads, .max_attempts = max_attempts, .center = center};
+    int rc = sample_bulge_omp(
+        (double *)PyArray_DATA(out), n_particles, seed, mass, bulgeedge, wmax, wmin,
+        streaming, &pot, &bulge, &df, &opts
+    );
+    Py_DECREF(df_energy);
+    Py_DECREF(df_log);
+    Py_DECREF(df_fmax);
+    Py_DECREF(apot_arr);
+    Py_DECREF(plcon_arr);
+    if (rc != 0) {
+        Py_DECREF(out);
+        PyErr_SetString(PyExc_RuntimeError, "bulge sampling failed");
+        return NULL;
+    }
+    return (PyObject *)out;
+}
+
 static PyMethodDef module_methods[] = {
     {"extension_available", (PyCFunction)py_extension_available, METH_NOARGS, "True if built with OpenMP"},
     {"sample_halo", (PyCFunction)py_sample_halo, METH_VARARGS | METH_KEYWORDS, "OpenMP halo sampler"},
     {"sample_disk", (PyCFunction)py_sample_disk, METH_VARARGS | METH_KEYWORDS, "OpenMP disk sampler"},
+    {"sample_bulge", (PyCFunction)py_sample_bulge, METH_VARARGS | METH_KEYWORDS, "OpenMP bulge sampler"},
     {NULL, NULL, 0, NULL},
 };
 

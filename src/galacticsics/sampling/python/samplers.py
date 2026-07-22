@@ -379,11 +379,16 @@ def sample_bulge_python(
     n_particles: int,
     seed: int = -1,
     center: bool = True,
-    streaming: float = 0.0,
-    max_attempts: int = 500_000,
+    streaming: float = 0.5,
+    max_attempts: int | None = None,
+    progress_log: Callable[[str], None] | None = None,
+    config: SampleConfig | None = None,
 ) -> ParticleSet:
     """
     Rejection sampling for Sersic bulge particles (``genbulge``).
+
+    Uses the OpenMP C sampler when available (default); falls back to a pure
+    Python loop otherwise.
 
     Parameters
     ----------
@@ -396,15 +401,53 @@ def sample_bulge_python(
     center : bool, optional
         Subtract centre-of-mass position and velocity after acceptance.
     streaming : float, optional
-        Fraction of particles with inverted azimuthal velocity.
+        Fraction with positive cylindrical ``vφ`` after Cartesian sampling
+        (``0.5`` = isotropic Eddington, no net rotation).
     max_attempts : int, optional
-        Upper bound on rejection trials.
+        Upper bound on rejection trials. Defaults to
+        ``max(500_000, 15 * n_particles)`` (same rule as halo/disk).
+    progress_log : callable, optional
+        Progress callback.
+    config : SampleConfig, optional
+        Controls OpenMP dispatch (``use_openmp``, ``n_openmp_threads``).
 
     Returns
     -------
     ParticleSet
         Accepted bulge particles with component tag ``"bulge"``.
+
+    Notes
+    -----
+    Velocities are drawn in **Cartesian** ``(vx, vy, vz)`` inside the local
+    escape sphere (isotropic ``f(E)``). Streaming then adjusts the cylindrical
+    ``vφ`` sign in the ``(x, y)`` basis. Do not confuse that cylindrical frame
+    with writing ``(vR, vφ, vz)`` straight into the particle file.
     """
+    from galacticsics.sampling.openmp import (
+        openmp_sampler_status,
+        sample_bulge_openmp,
+        warn_python_sampler_fallback,
+    )
+
+    sampler = openmp_sampler_status(config)
+    if sampler.is_openmp:
+        n_threads = 0 if config is None else config.n_openmp_threads
+        try:
+            return sample_bulge_openmp(
+                work_dir,
+                n_particles=n_particles,
+                seed=seed,
+                center=center,
+                streaming=streaming,
+                max_attempts=max_attempts,
+                n_threads=n_threads,
+                progress_log=progress_log,
+            )
+        except RuntimeError as exc:
+            warn_python_sampler_fallback("genbulge", f"OpenMP failed: {exc}", progress_log=progress_log)
+    elif config is None or config.use_openmp:
+        warn_python_sampler_fallback("genbulge", sampler.reason, progress_log=progress_log)
+
     from galacticsics.potential.poisson.sersic import (
         bulge_density_spherical,
         sersic_params_from_bulge,
@@ -415,7 +458,14 @@ def sample_bulge_python(
     masses = (work_dir / "mr.dat").read_text().splitlines()
     bulgemass = float(masses[1].split()[0])
     bulgeedge = float(masses[1].split()[1])
+    # Prefer bulge_params.dat (includes ppp); dbh.dat header drops ppp → 0.
     bulge = pot.model.bulge
+    params_path = work_dir / "bulge_params.dat"
+    if params_path.is_file():
+        nnn, ppp, v0b, ab = (float(x) for x in params_path.read_text().split()[:4])
+        from galacticsics.models import SersicBulge
+
+        bulge = SersicBulge(n_sersic=nnn, ppp=ppp, v0=v0b, a=ab, enabled=True)
     if bulgemass <= 0.0 or bulgeedge <= 0.0:
         if bulge is not None:
             bulgemass = max(bulgemass, bulge.v0**2 * bulge.a)
@@ -452,29 +502,46 @@ def sample_bulge_python(
         return float(np.exp(log_interp(psi)))
 
     fcut = df_bulge(psic)
-    params = sersic_params_from_bulge(bulge)
-    r_grid = np.linspace(0.0, bulgeedge, 50)
-    rhocur = np.array(
-        [bulge_density_spherical(float(r), bulge, params) for r in r_grid]
-    ) * r_grid * r_grid
-    rhomax = float(rhocur.max()) * 1.5
-    rhomin = 1e-10 * rhomax
+    # Running max of f(E)-fcut on the DF table (low→high E). Required when f is
+    # non-monotonic; fmax=f(ψ) alone accepts escape-speed trials if f(ψ) is tiny.
+    e_sorted = energies
+    f_sorted = np.maximum(np.exp(log_df) - fcut, 0.0)
+    fmax_cum = np.maximum.accumulate(f_sorted)
 
+    def fmax_at_psi(psi: float) -> float:
+        if psi <= float(e_sorted[0]):
+            return float(fmax_cum[0])
+        if psi >= float(e_sorted[-1]):
+            return float(fmax_cum[-1])
+        j = int(np.searchsorted(e_sorted, psi, side="right") - 1)
+        return float(fmax_cum[max(0, j)])
+
+    params = sersic_params_from_bulge(bulge)
+    # Spherical proposal: r from ∝ r² ρ(r), μ=cosθ uniform, φ uniform.
+    # Avoids the legacy cylindrical (R, z=R tan v) envelope that looks like a can.
+    n_r = max(64, int(bulgeedge / max(bulge.a, 0.05) * 20))
+    r_grid = np.linspace(0.0, bulgeedge, n_r)
+    rho_r = np.array(
+        [bulge_density_spherical(float(r), bulge, params) for r in r_grid],
+        dtype=float,
+    )
+    weight = rho_r * r_grid * r_grid
+    wmax = float(weight.max()) * 1.5 if weight.size else 0.0
+    wmin = 1e-10 * wmax if wmax > 0.0 else 0.0
+
+    attempt_limit = max_attempts if max_attempts is not None else max(500_000, 15 * n_particles)
     parts: list[tuple] = []
     attempts = 0
-    while len(parts) < n_particles and attempts < max_attempts:
+    while len(parts) < n_particles and attempts < attempt_limit:
         attempts += 1
-        u1 = bulgeedge * rng.random()
-        v1 = math.pi * (rng.random() * 2 - 1)
-        r_cyl = u1
-        z = r_cyl * math.tan(v1)
-        if abs(z) > 2 * bulgeedge:
+        rad = bulgeedge * rng.random()
+        w = bulge_density_spherical(rad, bulge, params) * rad * rad
+        if w < wmin or wmax * rng.random() > w:
             continue
-        rad = math.hypot(r_cyl, z)
-        rhotst = bulge_density_spherical(rad, bulge, params) * (r_cyl * r_cyl + z * z)
-        if rhotst < rhomin or (rhomax - rhomin) * rng.random() > rhotst:
-            continue
-        phi = rng.uniform(0, 2 * math.pi)
+        mu = 2.0 * rng.random() - 1.0
+        phi = rng.uniform(0.0, 2.0 * math.pi)
+        r_cyl = rad * math.sqrt(max(0.0, 1.0 - mu * mu))
+        z = rad * mu
         x = r_cyl * math.cos(phi)
         y = r_cyl * math.sin(phi)
         psi = evaluate_potential(pot, r_cyl, z)
@@ -482,41 +549,50 @@ def sample_bulge_python(
             continue
         vmax2 = 2 * (psi - psic)
         vmax = math.sqrt(max(vmax2, 0.0))
-        fmax = max(df_bulge(psi) - fcut, 0.0)
+        fmax = fmax_at_psi(psi)
         if fmax <= 0:
             continue
         accepted = False
+        vx = vy = vz = 0.0
         while not accepted:
             v2 = 1.1 * vmax2
+            # Isotropic Eddington: draw Cartesian (vx,vy,vz) in the escape sphere.
+            # Do not treat cylindrical (vR,vφ,vz) as if they were already Cartesian.
             while v2 > vmax2:
-                vR = 2 * vmax * (rng.random() - 0.5)
-                vp = 2 * vmax * (rng.random() - 0.5)
+                vx = 2 * vmax * (rng.random() - 0.5)
+                vy = 2 * vmax * (rng.random() - 0.5)
                 vz = 2 * vmax * (rng.random() - 0.5)
-                v2 = vR * vR + vp * vp + vz * vz
+                v2 = vx * vx + vy * vy + vz * vz
             energy = psi - 0.5 * v2
             f0 = max(df_bulge(energy) - fcut, 0.0)
             if fmax * rng.random() <= f0:
                 accepted = True
-        if rng.random() < streaming:
-            vp = abs(vp)
-        else:
-            vp = -abs(vp)
+        # Optional streaming: flip the cylindrical vφ sign in the (x,y) basis.
         r_cyl_pos = math.hypot(x, y)
-        if r_cyl_pos > 0:
+        if r_cyl_pos > 0.0:
             cph, sph = x / r_cyl_pos, y / r_cyl_pos
+            vR = vx * cph + vy * sph
+            vp = -vx * sph + vy * cph
+            if rng.random() < streaming:
+                vp = abs(vp)
+            else:
+                vp = -abs(vp)
             vx = vR * cph - vp * sph
             vy = vR * sph + vp * cph
-        else:
-            vx, vy = vR, vp
         parts.append((mass, x, y, z, vx, vy, vz))
 
     if len(parts) < n_particles:
-        raise RuntimeError(f"bulge sampling failed after {attempts} attempts ({len(parts)}/{n_particles})")
-
+        raise RuntimeError(
+            f"bulge sampling failed after {attempts} attempts "
+            f"({len(parts)}/{n_particles}); raise max_attempts "
+            f"(current limit {attempt_limit})"
+        )
     data = np.zeros(n_particles, dtype=PARTICLE_DTYPE)
     for i, row in enumerate(parts):
         for j, name in enumerate(PARTICLE_DTYPE.names):
             data[name][i] = row[j]
     if center:
         data = _center_particles(data)
+    if progress_log:
+        progress_log(f"  genbulge: {n_particles:,}/{n_particles:,} particles (Python)")
     return ParticleSet(data, component="bulge")

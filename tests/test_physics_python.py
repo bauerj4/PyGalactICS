@@ -208,3 +208,57 @@ def test_python_sample_bulge(tmp_path: Path) -> None:
     bulge = result.particles["bulge"]
     assert len(bulge) == 24
     assert abs(bulge.center_of_mass).max() < 1.0
+    assert (work / "bulge_params.dat").is_file()
+    # Isotropic Eddington: ~half the bulge should have vφ > 0
+    d = bulge.data
+    R = np.hypot(d["x"], d["y"])
+    vphi = np.where(R > 0, (-d["y"] * d["vx"] + d["x"] * d["vy"]) / R, 0.0)
+    assert 0.25 < float((vphi > 0).mean()) < 0.75
+
+
+@pytest.mark.physics_python
+def test_sersic_force_matches_monopole_enclosed_mass() -> None:
+    """sersic_force must use Γ×P once (double-Γ made denspsibulge ~10⁻⁷)."""
+    from galacticsics.models import NFWHalo, SersicBulge
+    from galacticsics.potential.poisson.df_tables import build_monopole_estimates
+    from galacticsics.potential.poisson.sersic import sersic_force, sersic_params_from_bulge
+
+    model = GalaxyModel(
+        halo=NFWHalo(r_outer=40.0, v0=2.0, a=6.0, dr_trunc=6.0, enabled=True),
+        bulge=SersicBulge(n_sersic=4.0, ppp=0.5, v0=1.5, a=0.4, enabled=True),
+        grid=PotentialGrid(dr=0.05, nr=200, lmax=0),
+    )
+    _hpot, _hfr, _dd, _dp, _dfr, _bpot, bfr = build_monopole_estimates(model)
+    params = sersic_params_from_bulge(model.bulge)
+    dr = model.grid.dr
+    # Compare analytic force to monopole table away from the origin
+    for r in (0.2, 0.4, 0.8, 1.5):
+        i = int(round(r / dr))
+        mono = abs(float(bfr[i]))
+        anal = abs(sersic_force(r, params))
+        assert mono > 0.0 and anal > 0.0
+        assert abs(anal - mono) / mono < 0.15, f"r={r}: analytic={anal} mono={mono}"
+
+
+@pytest.mark.physics_python
+def test_sersic_df_table_not_vanishing(tmp_path: Path) -> None:
+    """Bulge DF ρ(ψ) must be comparable to halo (not ~10⁻⁷ from force bug)."""
+    from galacticsics.models import NFWHalo, SersicBulge
+    from galacticsics.potential.poisson.df_tables import write_df_artifacts
+
+    model = GalaxyModel(
+        halo=NFWHalo(r_outer=40.0, v0=2.0, a=6.0, dr_trunc=6.0, enabled=True),
+        bulge=SersicBulge(n_sersic=4.0, ppp=0.5, v0=1.5, a=0.4, enabled=True),
+        grid=PotentialGrid(dr=0.1, nr=80, lmax=0),
+    )
+    work = tmp_path / "df_bulge"
+    work.mkdir()
+    # Need a solved potential first
+    solve_potential(model, work_dir=work, cleanup=False, backend=PhysicsBackendKind.PYTHON)
+    _psi0, _psic, _psid, energies, dens_h, dens_b = write_df_artifacts(work, model)
+    assert dens_b is not None
+    peak_b = float(np.max(dens_b))
+    # Analytic densψ mapping → peak should be O(1)+ for this model (not DF round-trip ~0.1)
+    assert peak_b > 1.0, f"denspsibulge still vanishing: peak={peak_b}"
+    assert np.isfinite(dens_b).all()
+    del energies, dens_h

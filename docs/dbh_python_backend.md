@@ -54,7 +54,9 @@ and asserts disk Σ(R) drift < 55% and halo ρ(r) drift < 75% (coarse grid, 8k p
 |------|----------|--------|
 | `n_workers` | `solve_potential(..., n_workers=N)` | Thread-pool size for polar shell integration during each Poisson iteration |
 | `GALACTICSICS_SOLVE_WORKERS` | environment | Default worker count when `n_workers` is omitted (`0` = serial) |
-| `GALACTICSICS_POISSON_THREADS` | environment | OpenMP threads for the optional C polar integrator (`0` = Python path) |
+| `GALACTICSICS_POISSON_THREADS` | environment | OpenMP threads for the C polar integrator. **Unset = all CPUs** when the extension is built; `0` forces the Python path |
+| `GALACTICSICS_POISSON_GPU` | environment | `1` = CuPy batched polar fill (takes precedence over OpenMP when a CUDA device is present) |
+| `GALACTICSICS_DISKDF_WORKERS` | environment | Thread-pool size for radial ``vφ`` quadratures in Python `diskdf` (`1` = serial) |
 | Coarse grid auto-scaling | `solve.py` | Reduces polar nodes, DF table size, and iteration cap when `grid.nr` is small |
 | `scripts/benchmark_solve.py` | CLI | Times solve + optional `freqdbh` retabulation |
 
@@ -64,13 +66,17 @@ Shell integration uses vectorized NumPy density evaluation (`halo_density_spheri
 onto all active even harmonics.  An optional OpenMP C extension
 (`galacticsics.potential.poisson._poisson_c`) parallelizes the shell loop; build with
 `pip install -e .` (requires gcc and OpenMP).  Set `GALACTICSICS_POISSON_THREADS=4`
-(and leave `n_workers=0`) to use it.
+(and leave `n_workers=0`) to use it.  For GPU, set `GALACTICSICS_POISSON_GPU=1` (CuPy);
+the polar fill batches all shells in one `potential_at_batch` then reduces Legendre moments
+on device.
 
 ```bash
 # Benchmark solve (coarse MW grid nr=4000 by default)
 python scripts/benchmark_solve.py --repeat 1
 # OpenMP polar integration
 GALACTICSICS_POISSON_THREADS=8 python scripts/benchmark_solve.py --repeat 1
+# CuPy batched polar fill
+GALACTICSICS_POISSON_GPU=1 GALACTICSICS_POISSON_THREADS=0 python scripts/benchmark_solve.py --repeat 1
 # Python thread pool instead of OpenMP
 GALACTICSICS_SOLVE_WORKERS=8 GALACTICSICS_POISSON_THREADS=0 python scripts/benchmark_solve.py
 ```

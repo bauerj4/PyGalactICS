@@ -158,7 +158,7 @@ Default notebook parameters: **N = 1024**, **Δt ≈ 0.041** code units (~0.4 My
 **12 500 steps** (5 Gyr at 2500 steps/Gyr), energy runs via `mpirun -n 4`.
 
 ```bash
-pip install jupyter matplotlib tqdm
+pip install jupyter   # optional; matplotlib and tqdm ship with the base install
 source .venv/bin/activate
 jupyter notebook notebooks/nfw_halo_walkthrough.ipynb
 ```

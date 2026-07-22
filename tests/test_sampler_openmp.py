@@ -10,8 +10,17 @@ import pytest
 
 from galacticsics.models import GalaxyModel, PotentialGrid
 from galacticsics.potential.solver import solve_potential
-from galacticsics.sampling.openmp import extension_available, sample_disk_openmp, sample_halo_openmp
-from galacticsics.sampling.python.samplers import sample_disk_python, sample_halo_python
+from galacticsics.sampling.openmp import (
+    extension_available,
+    sample_bulge_openmp,
+    sample_disk_openmp,
+    sample_halo_openmp,
+)
+from galacticsics.sampling.python.samplers import (
+    sample_bulge_python,
+    sample_disk_python,
+    sample_halo_python,
+)
 from galacticsics.sampling.sampler import SampleConfig
 
 
@@ -26,6 +35,20 @@ def _small_work_dir(tmp_path: Path) -> Path:
     work.mkdir()
     solve_potential(model, work_dir=work, cleanup=False)
     solve_diskdf_python(model, work, n_iterations=1, n_radial_steps=12)
+    return work
+
+
+def _bulge_halo_work_dir(tmp_path: Path) -> Path:
+    from galacticsics.models import NFWHalo, SersicBulge
+
+    model = GalaxyModel(
+        halo=NFWHalo(r_outer=40.0, v0=2.0, a=6.0, dr_trunc=6.0, enabled=True),
+        bulge=SersicBulge(n_sersic=4.0, ppp=0.5, v0=1.5, a=0.4, enabled=True),
+        grid=PotentialGrid(dr=0.1, nr=80, lmax=0),
+    )
+    work = tmp_path / "omp_bulge"
+    work.mkdir()
+    solve_potential(model, work_dir=work, cleanup=False)
     return work
 
 
@@ -185,3 +208,45 @@ def test_disk_sampler_radial_jacobian_invu(tmp_path: Path) -> None:
         assert _mean_v_phi(omp.data) > 0.5
         # Toy coarse-grid models are hotter than MW; production MW hits ≳0.95.
         assert ((-omp.data["y"] * omp.data["vx"] + omp.data["x"] * omp.data["vy"]) > 0).mean() > 0.85
+
+
+@pytest.mark.physics_python
+def test_openmp_bulge_matches_python_mass_and_shape(tmp_path: Path) -> None:
+    import numpy as np
+
+    work = _bulge_halo_work_dir(tmp_path)
+    n = 1500
+    seed = -11
+    py = sample_bulge_python(
+        work, n_particles=n, seed=seed, center=True, config=SampleConfig(use_openmp=False)
+    )
+    omp = sample_bulge_openmp(work, n_particles=n, seed=seed, center=True)
+    assert len(py) == len(omp) == n
+    assert py.total_mass == pytest.approx(omp.total_mass, rel=1e-9)
+
+    def half_mass(data):
+        r = np.sqrt(data["x"] ** 2 + data["y"] ** 2 + data["z"] ** 2)
+        order = np.argsort(r)
+        c = np.cumsum(data["mass"][order])
+        return float(r[order[np.searchsorted(c, 0.5 * c[-1])]])
+
+    assert half_mass(omp.data) == pytest.approx(half_mass(py.data), rel=0.25)
+    R = np.hypot(omp.data["x"], omp.data["y"])
+    zrms = float(np.sqrt(np.average(omp.data["z"] ** 2, weights=omp.data["mass"])))
+    Rrms = float(np.sqrt(np.average(R * R, weights=omp.data["mass"])))
+    assert 0.55 < zrms / Rrms < 0.90
+
+
+@pytest.mark.physics_python
+@pytest.mark.slow
+def test_openmp_bulge_faster_than_python(tmp_path: Path) -> None:
+    work = _bulge_halo_work_dir(tmp_path)
+    n = 2000
+    cfg = SampleConfig(use_openmp=False)
+    t0 = time.perf_counter()
+    sample_bulge_python(work, n_particles=n, seed=-1, config=cfg)
+    py_dt = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    sample_bulge_openmp(work, n_particles=n, seed=-1)
+    omp_dt = time.perf_counter() - t0
+    assert omp_dt < py_dt

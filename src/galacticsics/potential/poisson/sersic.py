@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.optimize import brentq
-from scipy.special import gammainc, gammaincc, gammaln, gamma as gamma_fn
+from scipy.special import gammainc, gammaincc, gammaln
 
 from galacticsics.models import SersicBulge
 
@@ -141,12 +141,16 @@ def sersic_force(r: float, params: SersicParams) -> float:
     u = r / params.Re
     un = u ** (1.0 / params.n)
     aaa = params.n * (3.0 - params.ppp)
+    # Enclosed-mass factor: prefactor * Γ(aaa) * P(aaa, butt*u^{1/n})
+    # ``exp(gammaln(aaa))`` already supplies Γ(aaa); multiply only by the
+    # regularized incomplete gamma (do NOT multiply by Γ again).
     l2 = params.rho0 * (params.Re**3) * params.n * (params.butt ** (-aaa)) * math.exp(gammaln(aaa))
     arg = params.butt * un
     if aaa + 1.0 > arg:
-        l2 *= gamma_fn(aaa) * gammainc(aaa, arg)
+        l2 *= gammainc(aaa, arg)
     else:
-        l2 *= gamma_fn(aaa) * gammaincc(aaa, arg)
+        # Numerically stabler when P ≈ 1: P = 1 - Q
+        l2 *= 1.0 - gammaincc(aaa, arg)
     return -4.0 * math.pi * l2 / (r * r)
 
 

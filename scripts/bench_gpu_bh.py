@@ -87,9 +87,11 @@ def run_benchmarks(max_n: int = 1_000_000, theta: float = 0.5, output: str | Non
             worker_script = _os.path.join(
                 '/home/jbauer/PyGalactICS/src/ntropy/ntropy/forces', '_gpu_bh_worker.py')
             
+            # Scale timeout with N (tree build + multi-block walk + optional C ref)
+            timeout_s = max(300, int(120 + n / 2_000))
             r_gpu = _subproc.run(
                 [_sys.executable, worker_script, pos_path, mass_path, eps_path, str(theta), str(n), tmp_out],
-                capture_output=True, text=True, timeout=300)
+                capture_output=True, text=True, timeout=timeout_s)
             
             # Clean up temp files
             for f in (pos_path, mass_path, eps_path):

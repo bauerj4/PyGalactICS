@@ -42,6 +42,7 @@ class ForceContext:
     n_workers: int = 1
     _bh_tree: BarnesHutTree | None = field(default=None, repr=False)
     _bh_c_tree: BarnesHutTreeC | None = field(default=None, repr=False)
+    _gpu_bh_state: object | None = field(default=None, repr=False)
     _step_count: int = field(default=0, repr=False)
     _mpi_cache: MpiForceCache = field(default_factory=MpiForceCache, repr=False)
 
@@ -101,6 +102,28 @@ class ForceContext:
                 pos, mass, eps, target_indices=target_indices
             )
 
+        if method == "gpu_bh":
+            from ntropy.forces.gpu_bh import GpuBhState, compute_forces_gpu_bh
+
+            if self._gpu_bh_state is None:
+                self._gpu_bh_state = GpuBhState()
+            return compute_forces_gpu_bh(
+                pos,
+                mass,
+                eps,
+                theta=theta,
+                target_indices=target_indices,
+                state=self._gpu_bh_state,
+                bh_opts=self.config.bh_optimizations,
+            )
+
+        if method == "gpu_direct":
+            from ntropy.forces.gpu_direct import compute_forces_gpu
+
+            return compute_forces_gpu(
+                pos, mass, eps, target_indices=target_indices
+            )
+
         if method == "bh_c":
             if not extension_available():
                 raise ImportError(
@@ -122,6 +145,12 @@ class ForceContext:
                 bh_opts=bh_opts,
             )
 
+        if method != "bh":
+            raise ValueError(
+                f"Unknown force.method={method!r}; "
+                "expected one of brute, bh, bh_c, gpu_bh, gpu_direct"
+            )
+
         if self._should_rebuild_tree() or self._bh_tree is None:
             self._bh_tree = BarnesHutTree(pos, mass, eps)
         return compute_forces_bh(
@@ -141,5 +170,10 @@ class ForceContext:
         """Discard cached trees (e.g. after a large position change)."""
         self._bh_tree = None
         self._bh_c_tree = None
+        if self._gpu_bh_state is not None:
+            detach = getattr(self._gpu_bh_state, "detach", None)
+            if callable(detach):
+                detach()
+        self._gpu_bh_state = None
         self._mpi_cache.clear()
         self._step_count = 0

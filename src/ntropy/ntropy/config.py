@@ -189,7 +189,7 @@ class BhOptimizationsConfig:
 
 @dataclass
 class ForceConfig:
-    method: Literal["brute", "bh", "bh_c"] = "bh"
+    method: Literal["brute", "bh", "bh_c", "gpu_bh", "gpu_direct"] = "bh"
     theta: float = 0.5
     rebuild_every: int = 1
     active_subset: bool = True

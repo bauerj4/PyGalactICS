@@ -44,6 +44,11 @@ def main() -> None:
     p.add_argument("--nint", type=int, default=20)
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--out", type=Path, default=None, help="Write dbh artifacts here")
+    p.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Set GALACTICSICS_POISSON_GPU=1 for CuPy batched polar fill",
+    )
     args = p.parse_args()
 
     model, work_hint = _load_model(args)
@@ -52,6 +57,9 @@ def main() -> None:
 
     if args.n_workers is not None:
         os.environ["GALACTICSICS_SOLVE_WORKERS"] = str(args.n_workers)
+    if args.gpu:
+        os.environ["GALACTICSICS_POISSON_GPU"] = "1"
+        os.environ.setdefault("GALACTICSICS_POISSON_THREADS", "0")
 
     print(format_dbh_grid_summary(model))
     times: list[float] = []

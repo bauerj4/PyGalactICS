@@ -29,7 +29,9 @@ class SampleConfig:
     center : bool
         If ``True``, translate component center of mass to origin (``icofm=1``).
     stream_halo, stream_bulge : float
-        Fraction of halo/bulge particles with positive v_phi (streaming).
+        Fraction of halo/bulge particles assigned positive ``v_phi`` after
+        isotropic Eddington sampling. ``0.5`` keeps no net rotation (isotropic);
+        ``0`` / ``1`` force fully retrograde / prograde streaming.
     run_diskdf : bool
         If ``True`` and ``cordbh.dat`` is missing or invalid, run ``getfreqs`` +
         ``diskdf``.
@@ -43,7 +45,7 @@ class SampleConfig:
     seed_bulge: int = -1
     center: bool = True
     stream_halo: float = 0.5
-    stream_bulge: float = 0.0
+    stream_bulge: float = 0.5
     run_diskdf: bool = True
     use_openmp: bool = True
     n_openmp_threads: int = 0

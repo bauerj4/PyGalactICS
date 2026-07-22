@@ -15,6 +15,10 @@ from galacticsics.diagnostics.rotation_curve import (
     potential_rotation_curve,
     write_rotation_curve_diagnostic,
 )
+from galacticsics.diagnostics.virial import (
+    potential_gradient_cartesian,
+    virial_diagnostic_potential,
+)
 
 __all__ = [
     "DEFAULT_THRESHOLDS",
@@ -23,10 +27,12 @@ __all__ = [
     "nfw_density_profile",
     "nfw_rho0",
     "particle_rotation_curve",
+    "potential_gradient_cartesian",
     "potential_rotation_curve",
     "validate_bulge_df",
     "validate_disk_df",
     "validate_halo_df",
     "validate_ic_distribution_functions",
+    "virial_diagnostic_potential",
     "write_rotation_curve_diagnostic",
 ]
