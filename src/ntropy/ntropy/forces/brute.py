@@ -9,6 +9,11 @@ from ntropy.softening import (
     softened_acceleration_vectorized,
 )
 
+# Above this N, evaluate the full pairwise sum in target chunks so peak memory
+# stays O(CHUNK × N) instead of O(N²) with the (N, N, 3) broadcast.
+_BRUTE_CHUNK_THRESHOLD = 4096
+_BRUTE_CHUNK_SIZE = 2048
+
 
 def compute_forces_brute(
     pos: np.ndarray,
@@ -38,9 +43,17 @@ def compute_forces_brute(
 
     Notes
     -----
-    Time complexity is O(N²) or O(N × N_targets).
+    Time complexity is O(N²) or O(N × N_targets). For ``N`` above ~4096 the
+    all-targets path is evaluated in chunks to bound peak memory.
     """
     if target_indices is None:
-        return softened_acceleration_vectorized(pos, mass, eps)
+        n = len(mass)
+        if n <= _BRUTE_CHUNK_THRESHOLD:
+            return softened_acceleration_vectorized(pos, mass, eps)
+        acc = np.empty_like(pos, dtype=float)
+        for start in range(0, n, _BRUTE_CHUNK_SIZE):
+            chunk = np.arange(start, min(start + _BRUTE_CHUNK_SIZE, n))
+            acc[chunk] = softened_acceleration_targets(pos, mass, eps, chunk)
+        return acc
 
     return softened_acceleration_targets(pos, mass, eps, target_indices)

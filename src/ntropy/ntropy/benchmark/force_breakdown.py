@@ -12,6 +12,30 @@ from ntropy.forces.bhtree_c import BarnesHutTreeC, compute_forces_bh_c, extensio
 from ntropy.forces.brute import compute_forces_brute
 from ntropy.parallel.domains import domain_slices, sort_by_peano
 
+# ------------------------------------------------------------------ #
+# Optional GPU imports — guarded so the module loads without CuPy
+# ------------------------------------------------------------------ #
+
+try:
+    from ntropy.forces.gpu_direct import (
+        compute_forces_gpu,
+        gpu_available as _gpu_avail,
+    )
+    _GPU_MODULE = True
+except ImportError:
+    _GPU_MODULE = False
+    _gpu_avail = lambda: False  # type: ignore[misc]
+
+try:
+    from ntropy.forces.gpu_bh import (
+        compute_forces_gpu_bh,
+        gpu_bh_available as _gpu_bh_avail,
+    )
+    _GPU_BH_MODULE = True
+except ImportError:
+    _GPU_BH_MODULE = False
+    _gpu_bh_avail = lambda: False  # type: ignore[misc]
+
 
 @dataclass
 class BruteBreakdown:
@@ -169,6 +193,100 @@ def time_bh_c_components(
         ms_total=ms_total,
         build_fraction=frac,
     )
+
+
+# ====================================================================== #
+# GPU timing helpers
+# ====================================================================== #
+
+
+def time_gpu(
+    pos: np.ndarray,
+    mass: np.ndarray,
+    eps: np.ndarray,
+    *,
+    target_indices: np.ndarray | None = None,
+    n_warmup: int = 3,
+    n_repeat: int = 15,
+) -> float:
+    """Seconds per GPU direct-force evaluation.
+
+    Returns
+    -------
+    seconds : float
+        Median wall-clock time over ``n_repeat`` kernel launches (excluding
+        the initial host-to-device copy which is amortised).
+    """
+    if not _GPU_MODULE:
+        raise ImportError("ntropy[gpu] required for GPU benchmarks")
+
+    # Warm up once with full H2D transfer
+    compute_forces_gpu(pos, mass, eps, target_indices=target_indices)
+
+    start = time.perf_counter()
+    for _ in range(n_repeat):
+        compute_forces_gpu(pos, mass, eps, target_indices=target_indices)
+    return (time.perf_counter() - start) / n_repeat
+
+
+def time_gpu_bh(
+    pos: np.ndarray,
+    mass: np.ndarray,
+    eps: np.ndarray,
+    *,
+    theta: float = 0.5,
+    target_indices: np.ndarray | None = None,
+    n_warmup: int = 2,
+    n_repeat: int = 10,
+) -> dict[str, float]:
+    """Seconds per GPU Barnes-Hut evaluation (build + walk).
+
+    Returns a dict with ``ms_build``, ``ms_walk``, and ``ms_total`` keys
+    (all in milliseconds).
+    """
+    if not _GPU_BH_MODULE:
+        raise ImportError("ntropy[gpu] required for GPU BH benchmarks")
+
+    n = len(mass)
+    targets = (
+        np.arange(n, dtype=int)
+        if target_indices is None
+        else np.asarray(target_indices, dtype=int)
+    )
+
+    # Warm-up: first call includes tree build + transfer
+    compute_forces_gpu_bh(pos, mass, eps, theta=theta, target_indices=targets)
+
+    build_times: list[float] = []
+    walk_times: list[float] = []
+
+    for _ in range(n_warmup):
+        # Just burn the warmups with a full call
+        compute_forces_gpu_bh(pos, mass, eps, theta=theta, target_indices=targets)
+
+    for _ in range(n_repeat):
+        t0 = time.perf_counter()
+        tree_t = BarnesHutTreeC.build(pos, mass, eps)
+        build_times.append(time.perf_counter() - t0)
+
+        t1 = time.perf_counter()
+        compute_forces_gpu_bh(
+            pos, mass, eps, theta=theta, target_indices=targets,
+        )
+        walk_times.append(time.perf_counter() - t1 - build_times[-1])
+
+    ms_build = float(np.mean(build_times) * 1e3)
+    ms_walk = float(np.mean(walk_times) * 1e3)
+    return {
+        "ms_build": ms_build,
+        "ms_walk": ms_walk,
+        "ms_total": ms_build + ms_walk,
+    }
+
+
+# ====================================================================== #
+# Existing helpers (unmodified)
+# ====================================================================== #
 
 
 def mpi_domain_target_count(n_particles: int, n_ranks: int) -> int:

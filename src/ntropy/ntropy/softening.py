@@ -6,6 +6,9 @@ import numpy as np
 
 from ntropy.units import G
 
+# Above this particle count, skip O(N²) potential energy (use KE-only drift proxy).
+LARGE_N_ENERGY_THRESHOLD = 16_384
+
 
 def pairwise_softening(eps_i: np.ndarray, eps_j: np.ndarray) -> np.ndarray:
     """
@@ -136,12 +139,15 @@ def softened_potential_energy(
     """
     n = len(mass)
     energy = 0.0
-    h_ij = pairwise_softening(eps, eps)
     for i in range(n - 1):
+        mi = mass[i]
+        if mi == 0.0:
+            continue
         dr = pos[i + 1 :] - pos[i]
-        r = np.sqrt(np.sum(dr * dr, axis=1))
-        h = h_ij[i, i + 1 :]
-        energy -= G * mass[i] * np.sum(mass[i + 1 :] / np.sqrt(r * r + h * h))
+        r2 = np.sum(dr * dr, axis=1)
+        h = 0.5 * (eps[i] + eps[i + 1 :])
+        mj = mass[i + 1 :]
+        energy -= G * mi * np.sum(mj / np.sqrt(r2 + h * h))
     return float(energy)
 
 
@@ -163,22 +169,111 @@ def kinetic_energy(vel: np.ndarray, mass: np.ndarray) -> float:
     return float(0.5 * np.sum(mass * np.sum(vel * vel, axis=1)))
 
 
-def total_energy(
+def virial_diagnostic(
     pos: np.ndarray,
     vel: np.ndarray,
     mass: np.ndarray,
     eps: np.ndarray,
-) -> float:
+    *,
+    rtol: float = 0.3,
+    max_particles: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> dict[str, float | bool | int]:
     """
-    Total energy (kinetic + softened potential).
+    Virial-theorem check for a self-gravitating N-body state.
+
+    For equilibrium, ``2T + W ≈ 0`` (equivalently ``T/|W| ≈ 0.5`` or
+    ``2T/|W| ≈ 1``).  Uses the same Plummer-softened pairwise potential as
+    :func:`softened_potential_energy`.
+
+    When ``N`` exceeds ``max_particles`` (default
+    :data:`LARGE_N_ENERGY_THRESHOLD`), a random subset is used for the
+    potential term so the check stays O(N_sub²).
 
     Parameters
     ----------
     pos, vel, mass, eps
         Particle state arrays.
+    rtol
+        Relative tolerance on ``|2T + W| / |W|`` for the equilibrium flag.
+    max_particles
+        Cap on particles used for the potential sum; ``None`` uses
+        :data:`LARGE_N_ENERGY_THRESHOLD`.
+    rng
+        Random generator for subsampling (default: unseeded).
+
+    Returns
+    -------
+    dict
+        ``kinetic_energy``, ``potential_energy``, ``virial_sum`` (2T+W),
+        ``virial_ratio`` (2T/|W|), ``ke_over_abs_pe`` (T/|W|),
+        ``virial_residual_rel`` (|2T+W|/|W|), ``is_virial_equilibrium``,
+        ``n_particles``, ``n_used``, ``subsampled``.
+    """
+    n = len(mass)
+    cap = LARGE_N_ENERGY_THRESHOLD if max_particles is None else max_particles
+    subsampled = n > cap
+    if subsampled:
+        # T and W must use the same particles.  Prefer mass-weighted sampling so a
+        # disk+halo mix (many light disk particles) still represents the mass that
+        # dominates the potential; uniform particle picks understate |W|.
+        rng = rng or np.random.default_rng()
+        u = np.clip(rng.random(n), 1e-300, 1.0)
+        keys = u ** (1.0 / np.maximum(mass.astype(float), 1e-300))
+        idx = np.argpartition(keys, -cap)[-cap:]
+        ke = kinetic_energy(vel[idx], mass[idx])
+        pe = softened_potential_energy(pos[idx], mass[idx], eps[idx])
+        n_used = cap
+    else:
+        ke = kinetic_energy(vel, mass)
+        pe = softened_potential_energy(pos, mass, eps)
+        n_used = n
+    abs_pe = abs(pe)
+    virial_sum = 2.0 * ke + pe
+    virial_ratio = (2.0 * ke / abs_pe) if abs_pe > 0 else 0.0
+    ke_over_abs_pe = (ke / abs_pe) if abs_pe > 0 else 0.0
+    residual_rel = abs(virial_sum) / max(abs_pe, 1e-30)
+    return {
+        "kinetic_energy": ke,
+        "potential_energy": pe,
+        "virial_sum": virial_sum,
+        "virial_ratio": virial_ratio,
+        "ke_over_abs_pe": ke_over_abs_pe,
+        "virial_residual_rel": residual_rel,
+        "is_virial_equilibrium": residual_rel <= rtol,
+        "n_particles": n,
+        "n_used": n_used,
+        "subsampled": subsampled,
+    }
+
+
+def total_energy(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    mass: np.ndarray,
+    eps: np.ndarray,
+    *,
+    allow_kinetic_only: bool = True,
+) -> float:
+    """
+    Total energy (kinetic + softened potential).
+
+    For ``N > LARGE_N_ENERGY_THRESHOLD`` (default 16384), returns kinetic
+    energy only to avoid O(N²) memory and time.  Tiered diagnostics then
+    report kinetic-energy drift, which is still a useful stability proxy.
+
+    Parameters
+    ----------
+    pos, vel, mass, eps
+        Particle state arrays.
+    allow_kinetic_only : bool
+        When ``True`` (default), large ``N`` uses the KE-only fast path.
 
     Returns
     -------
     energy : float
     """
-    return kinetic_energy(vel, mass) + softened_potential_energy(pos, mass, eps)
+    ke = kinetic_energy(vel, mass)
+    if allow_kinetic_only and len(mass) > LARGE_N_ENERGY_THRESHOLD:
+        return ke
+    return ke + softened_potential_energy(pos, mass, eps)

@@ -315,3 +315,12 @@ src/ntropy/
 - Springel (2005) — Gadget-2 domain decomposition
 - Binney & Tremaine (2008) — Eddington/Abel DF inversion
 - Navarro, Frenk & White (1997) — NFW profile
+
+## History and roadmaps
+
+- [HISTORY.md](HISTORY.md) — ntropy development chronology
+- [Performance roadmap](../../docs/performance_roadmap.md)
+- [Full MW roadmap](../../docs/full_mw_roadmap.md)
+- [ML / transformer representations](../../docs/ml_representation_roadmap.md)
+- [ML encoder strategy](../../docs/ml_encoder_strategy.md)
+- [Campaign density walkthrough](../../notebooks/campaign_density_walkthrough.ipynb)

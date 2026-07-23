@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
 
 if TYPE_CHECKING:
@@ -48,22 +49,20 @@ class GalactICSSampleResult:
 
 def galacticsics_available() -> bool:
     """
-    Return True when galacticsics and required legacy binaries are present.
+    Return True when galacticsics can run disk+halo IC workflows.
 
-    Checks for ``dbh`` and ``genhalo`` in ``legacy/bin/``.
+    Uses the Python physics backend by default; legacy binaries are optional.
     """
     try:
-        from galacticsics.legacy.paths import require_binary
+        from galacticsics.physics.backend import physics_backend_available
 
-        require_binary("dbh")
-        require_binary("genhalo")
-        return True
-    except (ImportError, FileNotFoundError):
+        return physics_backend_available()
+    except ImportError:
         return False
 
 
 def require_galacticsics() -> None:
-    """Raise ``ImportError`` or ``FileNotFoundError`` if integration is unavailable."""
+    """Raise ``ImportError`` if integration is unavailable."""
     try:
         import galacticsics  # noqa: F401
     except ImportError as exc:
@@ -71,10 +70,16 @@ def require_galacticsics() -> None:
             "galacticsics is required for this workflow. "
             "Install from the repo root: pip install -e '.[dev]'"
         ) from exc
-    from galacticsics.legacy.paths import require_binary
+    from galacticsics.physics.backend import physics_backend_available, resolve_physics_backend
 
-    require_binary("dbh")
-    require_binary("genhalo")
+    if not physics_backend_available():
+        backend = resolve_physics_backend(None)
+        if backend.value == "legacy":
+            from galacticsics.legacy.paths import require_binary
+
+            require_binary("dbh")
+            require_binary("genhalo")
+        raise RuntimeError("galacticsics physics backend is not available")
 
 
 def particle_state_from_galacticsics(
@@ -117,6 +122,7 @@ def merge_galacticsics_components(
     *,
     eps_by_component: dict[str, float] | None = None,
     default_eps: float = 0.05,
+    type_registry: "TypeRegistry | None" = None,
 ) -> ParticleState:
     """
     Merge multiple galacticsics components into one ntropy state.
@@ -129,17 +135,26 @@ def merge_galacticsics_components(
         Per-component softening lengths.
     default_eps : float
         Fallback softening when a component is not in ``eps_by_component``.
+    type_registry : TypeRegistry, optional
+        Maps component names to integer type ids (default: halo/bulge/disk).
 
     Returns
     -------
     ParticleState
-        Combined state with ``tags`` set; center of mass removed.
+        Combined state with ``tags`` and ``type_id`` set; center of mass removed.
     """
     eps_by_component = eps_by_component or {}
+    registry = type_registry or TypeRegistry.default_galaxy()
     parts: list[ParticleState] = []
+    type_ids: list[np.ndarray] = []
     for name, ps in particles.items():
-        eps = eps_by_component.get(name, default_eps)
-        parts.append(particle_state_from_galacticsics(ps, eps=eps, tag=name))
+        eps = eps_by_component.get(name, registry.eps_for(name) if name in registry.types else default_eps)
+        part = particle_state_from_galacticsics(ps, eps=eps, tag=name)
+        if name in registry.types:
+            tid = registry.id_for(name)
+            part.type_id = np.full(part.n, tid, dtype=np.int32)
+        type_ids.append(part.type_id if part.type_id is not None else np.zeros(part.n, dtype=np.int32))
+        parts.append(part)
     if not parts:
         raise ValueError("No particle components to merge")
 
@@ -148,8 +163,8 @@ def merge_galacticsics_components(
     mass = np.concatenate([p.mass for p in parts])
     eps = np.concatenate([p.eps for p in parts])
     tags = np.concatenate([p.tags for p in parts])
-    state = ParticleState.from_arrays(pos, vel, mass, eps)
-    state.tags = tags
+    merged_type_id = np.concatenate(type_ids)
+    state = ParticleState.from_arrays(pos, vel, mass, eps, type_id=merged_type_id, tags=tags)
     state.remove_center_of_mass()
     return state
 
@@ -226,6 +241,7 @@ def sample_galacticsics_halo(
     require_galacticsics()
     import tempfile
 
+    from galacticsics.physics.backend import PhysicsBackendKind
     from galacticsics.potential.solver import solve_potential
     from galacticsics.sampling.sampler import SampleConfig, sample_galaxy
 
@@ -240,7 +256,13 @@ def sample_galacticsics_halo(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     if solve:
-        solve_potential(model, work_dir=work_dir, cleanup=False, timeout=timeout)
+        solve_potential(
+            model,
+            work_dir=work_dir,
+            cleanup=False,
+            timeout=timeout,
+            backend=PhysicsBackendKind.PYTHON,
+        )
 
     config = SampleConfig(
         n_disk=0,
@@ -249,12 +271,14 @@ def sample_galacticsics_halo(
         seed_halo=seed,
         run_diskdf=False,
         center=True,
+        use_openmp=True,
     )
     sample_result = sample_galaxy(
         model,
         config,
         work_dir=work_dir,
         cleanup=False,
+        backend=PhysicsBackendKind.PYTHON,
     )
     if "halo" not in sample_result.particles:
         raise RuntimeError("genhalo did not produce halo particles")
@@ -318,6 +342,7 @@ def sample_galacticsics_galaxy(
     require_galacticsics()
     import tempfile
 
+    from galacticsics.physics.backend import PhysicsBackendKind
     from galacticsics.potential.solver import solve_potential
     from galacticsics.sampling.sampler import sample_galaxy
 
@@ -332,7 +357,13 @@ def sample_galacticsics_galaxy(
 
     artifact_path = Path(artifact_dir) if artifact_dir is not None else None
     if artifact_path is None and solve:
-        solve_potential(model, work_dir=work_dir, cleanup=False, timeout=timeout)
+        solve_potential(
+            model,
+            work_dir=work_dir,
+            cleanup=False,
+            timeout=timeout,
+            backend=PhysicsBackendKind.PYTHON,
+        )
 
     sample_result = sample_galaxy(
         model,
@@ -340,6 +371,7 @@ def sample_galacticsics_galaxy(
         work_dir=work_dir,
         artifact_dir=artifact_path,
         cleanup=False,
+        backend=PhysicsBackendKind.PYTHON,
     )
     if not sample_result.particles:
         raise RuntimeError("No particles were sampled")

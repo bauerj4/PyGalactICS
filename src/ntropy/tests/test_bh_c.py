@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.essential
+
 from ntropy.forces.bhtree import compute_forces_bh
 from ntropy.forces.brute import compute_forces_brute
 from ntropy.forces.bhtree_c import (

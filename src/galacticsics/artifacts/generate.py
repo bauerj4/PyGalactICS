@@ -10,18 +10,17 @@ from typing import Any
 
 from galacticsics.artifacts.paths import default_artifact_dir, reference_model
 from galacticsics.artifacts.verify import verify_artifact_consistency
-from galacticsics.io.legacy_inputs import write_diskdf_input
-from galacticsics.legacy.paths import require_binary
-from galacticsics.legacy.runner import LegacyRunner
 from galacticsics.models import GalaxyModel
+from galacticsics.physics.backend import PhysicsBackendKind
 from galacticsics.potential.solver import solve_potential
-from galacticsics.sampling.sampler import SampleConfig, sample_galaxy
+from galacticsics.sampling.sampler import SampleConfig, ensure_disk_df, sample_galaxy
 
 
 def _write_manifest(path: Path, model: GalaxyModel, *, extra: dict[str, Any] | None = None) -> None:
     """Record model parameters used to produce artifacts."""
     payload: dict[str, Any] = {
         "model": "reference_disk_halo",
+        "physics_backend": "python",
         "grid": {"dr": model.grid.dr, "nr": model.grid.nr, "lmax": model.grid.lmax},
         "halo": {
             "r_outer_kpc": model.halo.r_outer if model.halo else None,
@@ -48,6 +47,7 @@ def generate_reference_artifacts(
     seed: int = -42,
     verify: bool = True,
     force: bool = False,
+    backend: PhysicsBackendKind | str = PhysicsBackendKind.PYTHON,
 ) -> Path:
     """
     Build the full reference artifact tree used by tests.
@@ -55,8 +55,8 @@ def generate_reference_artifacts(
     Steps
     -----
     1. ``solve_potential`` (self-consistent disk + halo) → ``dbh.dat``, ``h.dat``, …
-    2. ``getfreqs`` + ``diskdf`` → ``freqdbh.dat``, ``cordbh.dat``, ``toomre2.5``
-    3. ``gendisk`` / ``genhalo`` → ``disk``, ``halo`` particle files
+    2. Python ``getfreqs`` + ``diskdf`` → ``freqdbh.dat``, ``cordbh.dat``
+    3. Python samplers → ``disk``, ``halo`` particle files
 
     Parameters
     ----------
@@ -72,6 +72,8 @@ def generate_reference_artifacts(
         Run :func:`verify_artifact_consistency` before returning.
     force : bool
         Regenerate even if ``manifest.json`` already exists.
+    backend : PhysicsBackendKind or str, optional
+        Physics backend (default Python).
 
     Returns
     -------
@@ -80,8 +82,6 @@ def generate_reference_artifacts(
 
     Raises
     ------
-    FileNotFoundError
-        If legacy binaries are not built.
     RuntimeError
         If consistency checks fail.
     """
@@ -95,25 +95,17 @@ def generate_reference_artifacts(
         return out
 
     model = model or reference_model()
-    require_binary("dbh")
-    require_binary("getfreqs")
-    require_binary("diskdf")
-    require_binary("gendisk")
-    require_binary("genhalo")
 
     if force:
         for child in out.iterdir():
             if child.is_file():
                 child.unlink()
 
-    solve = solve_potential(model, work_dir=out, cleanup=False, timeout=None)
+    solve = solve_potential(model, work_dir=out, cleanup=False, backend=backend)
     if not (out / "h.dat").is_file():
-        raise RuntimeError(f"dbh did not produce h.dat in {out}")
+        raise RuntimeError(f"solve did not produce h.dat in {out}")
 
-    runner = LegacyRunner(out)
-    runner.run("getfreqs")
-    write_diskdf_input(model, out / "in.diskdf")
-    runner.run("diskdf", stdin_path=out / "in.diskdf")
+    ensure_disk_df(model, out, backend=backend)
 
     config = SampleConfig(
         n_disk=sample_disk,
@@ -122,7 +114,7 @@ def generate_reference_artifacts(
         seed_halo=seed,
         run_diskdf=False,
     )
-    sample_galaxy(model, config, work_dir=out, artifact_dir=out, cleanup=False)
+    sample_galaxy(model, config, work_dir=out, artifact_dir=out, cleanup=False, backend=backend)
 
     _write_manifest(
         manifest,

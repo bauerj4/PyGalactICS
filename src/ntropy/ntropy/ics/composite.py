@@ -9,6 +9,7 @@ import numpy as np
 from ntropy.ics.disk import ExponentialDiskParams, sample_exponential_disk
 from ntropy.ics.nfw import NFWParams, sample_nfw
 from ntropy.ics.sersic import SersicParams, sample_sersic
+from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
 
 
@@ -113,7 +114,11 @@ def sample_composite(
     mass = np.concatenate([p.mass for _, p in parts])
     eps = np.concatenate([p.eps for _, p in parts])
     tags = np.concatenate([[name] * p.n for name, p in parts])
-    state = ParticleState.from_arrays(pos, vel, mass, eps)
-    state.tags = tags
+    registry = TypeRegistry.default_galaxy()
+    type_ids = []
+    for name, p in parts:
+        type_ids.append(np.full(p.n, registry.id_for(name), dtype=np.int32))
+    merged_type_id = np.concatenate(type_ids)
+    state = ParticleState.from_arrays(pos, vel, mass, eps, type_id=merged_type_id, tags=tags)
     state.remove_center_of_mass()
     return state

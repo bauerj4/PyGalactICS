@@ -1,0 +1,30 @@
+{
+  "seed": 42,
+  "particles": { "file": "particles.dat" },
+  "particle_types": {
+    "halo":  { "id": 1, "eps": 0.05, "min_timestep_bin": 0, "max_timestep_bin": 5 },
+    "bulge": { "id": 2, "eps": 0.02, "min_timestep_bin": 0, "max_timestep_bin": 4 },
+    "disk":  { "id": 3, "eps": 0.01, "min_timestep_bin": 0, "max_timestep_bin": 3 }
+  },
+  "force": { "method": "bh_c", "theta": 0.5, "rebuild_every": 1 },
+  "integrator": {
+    "type": "tiered_leapfrog",
+    "order": 2,
+    "dt_base": 0.025,
+    "end_time_gyr": 1.0,
+    "timestep": {
+      "eta": 0.025,
+      "dt_base": 0.025,
+      "max_bin": 6,
+      "update_every": 1
+    }
+  },
+  "output": {
+    "dir": "run_output",
+    "every": 0,
+    "write_final": true,
+    "diagnostics_every": 1,
+    "particle_dump_every": 100,
+    "write_particle_bins": true
+  }
+}

@@ -1,24 +1,17 @@
-"""Invoke legacy particle samplers (gendisk, genhalo, genbulge)."""
+"""Particle samplers (Python default; legacy Fortran optional)."""
 
 from __future__ import annotations
 
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from galacticsics.io.formats import read_particles_ascii
-from galacticsics.io.legacy_inputs import (
-    write_dbh_input,
-    write_diskdf_input,
-    write_gendenspsi_input,
-    write_genbulge_input,
-    write_gendisk_input,
-    write_genhalo_input,
-)
-from galacticsics.legacy.runner import LegacyRunner
+from galacticsics.io.legacy_inputs import write_dbh_input, write_gendenspsi_input
 from galacticsics.models import GalaxyModel
+from galacticsics.physics.backend import PhysicsBackendKind
 from galacticsics.sampling.particles import ParticleSet
 
 
@@ -36,9 +29,12 @@ class SampleConfig:
     center : bool
         If ``True``, translate component center of mass to origin (``icofm=1``).
     stream_halo, stream_bulge : float
-        Fraction of halo/bulge particles with positive v_phi (streaming).
+        Fraction of halo/bulge particles assigned positive ``v_phi`` after
+        isotropic Eddington sampling. ``0.5`` keeps no net rotation (isotropic);
+        ``0`` / ``1`` force fully retrograde / prograde streaming.
     run_diskdf : bool
-        If ``True`` and ``cordbh.dat`` is missing, run ``getfreqs`` + ``diskdf``.
+        If ``True`` and ``cordbh.dat`` is missing or invalid, run ``getfreqs`` +
+        ``diskdf``.
     """
 
     n_disk: int = 10_000
@@ -49,8 +45,10 @@ class SampleConfig:
     seed_bulge: int = -1
     center: bool = True
     stream_halo: float = 0.5
-    stream_bulge: float = 0.0
+    stream_bulge: float = 0.5
     run_diskdf: bool = True
+    use_openmp: bool = True
+    n_openmp_threads: int = 0
 
 
 @dataclass
@@ -99,18 +97,29 @@ def prepare_model_directory(
         write_dbh_input(model, work_dir / "in.dbh")
 
 
-def ensure_disk_df(model: GalaxyModel, work_dir: Path, runner: LegacyRunner) -> None:
-    """Run ``getfreqs`` and ``diskdf`` if ``cordbh.dat`` is absent."""
-    if (work_dir / "cordbh.dat").is_file():
-        return
-    if not (work_dir / "h.dat").is_file():
-        raise FileNotFoundError(
-            "h.dat required for diskdf; run solve_potential with a halo or "
-            "provide artifact_dir containing h.dat"
-        )
-    runner.run("getfreqs")
-    write_diskdf_input(model, work_dir / "in.diskdf")
-    runner.run("diskdf", stdin_path=work_dir / "in.diskdf")
+def ensure_disk_df(
+    model: GalaxyModel,
+    work_dir: Path,
+    runner=None,
+    *,
+    stream_output: bool = False,
+    backend: PhysicsBackendKind | str | None = None,
+    progress_log: Callable[[str], None] | None = None,
+) -> GalaxyModel:
+    """Run frequency tabulation + disk DF correction if ``cordbh.dat`` is missing or invalid."""
+    del runner
+    from galacticsics.physics.dispatch import backend_ensure_disk_df
+
+    return backend_ensure_disk_df(
+        model,
+        work_dir,
+        backend=backend,
+        stream_output=stream_output,
+        progress_log=progress_log,
+    )
+
+
+__all__ = ["SampleConfig", "SampleResult", "ensure_disk_df", "prepare_model_directory", "sample_bulge", "sample_disk", "sample_galaxy", "sample_halo"]
 
 
 def sample_disk(
@@ -118,54 +127,64 @@ def sample_disk(
     config: SampleConfig,
     *,
     output_name: str = "disk",
+    stream_output: bool = False,
+    backend: PhysicsBackendKind | str | None = None,
+    progress_log: Callable[[str], None] | None = None,
 ) -> ParticleSet:
-    """Sample stellar disk particles via ``legacy/bin/gendisk``."""
-    runner = LegacyRunner(work_dir)
-    stdin = work_dir / "in.disk"
-    write_gendisk_input(
-        stdin,
-        n_particles=config.n_disk,
-        seed=config.seed_disk,
-        center=config.center,
+    """Sample stellar disk particles."""
+    from galacticsics.physics.dispatch import backend_sample_disk
+
+    ps = backend_sample_disk(
+        work_dir,
+        config,
+        backend=backend,
+        stream_output=stream_output,
+        progress_log=progress_log,
     )
     out = work_dir / output_name
-    result = runner.run("gendisk", stdin_path=stdin)
-    out.write_text(result.stdout)
-    return ParticleSet(read_particles_ascii(out), component="disk")
+    if out.name != "disk" or not out.is_file():
+        ps.write_ascii(out)
+    return ps
 
 
-def sample_halo(work_dir: Path, config: SampleConfig) -> ParticleSet:
-    """Sample halo particles via ``legacy/bin/genhalo``."""
-    runner = LegacyRunner(work_dir)
-    stdin = work_dir / "in.halo"
-    write_genhalo_input(
-        stdin,
-        n_particles=config.n_halo,
-        seed=config.seed_halo,
-        center=config.center,
-        streaming=config.stream_halo,
+def sample_halo(
+    work_dir: Path,
+    config: SampleConfig,
+    *,
+    stream_output: bool = False,
+    backend: PhysicsBackendKind | str | None = None,
+    progress_log: Callable[[str], None] | None = None,
+) -> ParticleSet:
+    """Sample halo particles."""
+    from galacticsics.physics.dispatch import backend_sample_halo
+
+    return backend_sample_halo(
+        work_dir,
+        config,
+        backend=backend,
+        stream_output=stream_output,
+        progress_log=progress_log,
     )
-    out = work_dir / "halo"
-    result = runner.run("genhalo", stdin_path=stdin)
-    out.write_text(result.stdout)
-    return ParticleSet(read_particles_ascii(out), component="halo")
 
 
-def sample_bulge(work_dir: Path, config: SampleConfig) -> ParticleSet:
-    """Sample bulge particles via ``legacy/bin/genbulge``."""
-    runner = LegacyRunner(work_dir)
-    stdin = work_dir / "in.bulge"
-    write_genbulge_input(
-        stdin,
-        n_particles=config.n_bulge,
-        seed=config.seed_bulge,
-        center=config.center,
-        streaming=config.stream_bulge,
+def sample_bulge(
+    work_dir: Path,
+    config: SampleConfig,
+    *,
+    stream_output: bool = False,
+    backend: PhysicsBackendKind | str | None = None,
+    progress_log: Callable[[str], None] | None = None,
+) -> ParticleSet:
+    """Sample bulge particles."""
+    from galacticsics.physics.dispatch import backend_sample_bulge
+
+    return backend_sample_bulge(
+        work_dir,
+        config,
+        backend=backend,
+        stream_output=stream_output,
+        progress_log=progress_log,
     )
-    out = work_dir / "bulge"
-    result = runner.run("genbulge", stdin_path=stdin)
-    out.write_text(result.stdout)
-    return ParticleSet(read_particles_ascii(out), component="bulge")
 
 
 def sample_galaxy(
@@ -175,6 +194,10 @@ def sample_galaxy(
     work_dir: Optional[Path] = None,
     artifact_dir: Optional[Path] = None,
     cleanup: bool = True,
+    stream_output: bool = False,
+    backend: PhysicsBackendKind | str | None = None,
+    progress_log: Callable[[str], None] | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> SampleResult:
     """
     Sample all requested components into a single working directory.
@@ -206,18 +229,49 @@ def sample_galaxy(
         work_dir = Path(work_dir)
 
     prepare_model_directory(model, work_dir, artifact_dir=artifact_dir)
-    runner = LegacyRunner(work_dir)
 
     if config.n_disk > 0 and config.run_diskdf:
-        ensure_disk_df(model, work_dir, runner)
+        if on_stage is not None:
+            on_stage("diskdf")
+        model = ensure_disk_df(
+            model,
+            work_dir,
+            stream_output=stream_output,
+            backend=backend,
+            progress_log=progress_log,
+        )
 
     particles: dict[str, ParticleSet] = {}
     if config.n_disk > 0:
-        particles["disk"] = sample_disk(work_dir, config)
+        if on_stage is not None:
+            on_stage("gendisk")
+        particles["disk"] = sample_disk(
+            work_dir,
+            config,
+            stream_output=stream_output,
+            backend=backend,
+            progress_log=progress_log,
+        )
     if config.n_halo > 0:
-        particles["halo"] = sample_halo(work_dir, config)
+        if on_stage is not None:
+            on_stage("genhalo")
+        particles["halo"] = sample_halo(
+            work_dir,
+            config,
+            stream_output=stream_output,
+            backend=backend,
+            progress_log=progress_log,
+        )
     if config.n_bulge > 0:
-        particles["bulge"] = sample_bulge(work_dir, config)
+        if on_stage is not None:
+            on_stage("genbulge")
+        particles["bulge"] = sample_bulge(
+            work_dir,
+            config,
+            stream_output=stream_output,
+            backend=backend,
+            progress_log=progress_log,
+        )
 
     if owned and cleanup and tmp is not None:
         tmp.cleanup()

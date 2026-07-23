@@ -88,9 +88,10 @@ class GalaxyBuilder:
         *,
         work_dir: str | None = None,
         cleanup: bool = True,
+        backend: str | None = None,
     ) -> HarmonicPotential:
         """
-        Solve the self-consistent multipole potential via legacy ``dbh``.
+        Solve the self-consistent multipole potential (Python ``dbh`` by default).
 
         All enabled components (halo, disk, bulge, gas) are iterated together.
         For a fixed halo from particles or a prior solve, use
@@ -114,6 +115,7 @@ class GalaxyBuilder:
             self.model,
             work_dir=work_dir,
             cleanup=cleanup,
+            backend=backend,
         )
         self.potential = result.potential
         return self.potential
@@ -216,16 +218,14 @@ class GalaxyBuilder:
         self.halo_work_dir = result.work_dir.parent / "halo"
         return result
 
-    def solve_disk_df(self) -> DiskCorrectionTable:
-        """Run legacy ``diskdf`` (requires ``dbh.dat`` and ``h.dat``)."""
-        from galacticsics.legacy.runner import LegacyRunner
+    def solve_disk_df(self, *, backend: str | None = None) -> DiskCorrectionTable:
+        """Run disk DF correction (requires ``dbh.dat`` and ``h.dat``)."""
         from galacticsics.sampling.sampler import ensure_disk_df
 
         if self.model_dir is None:
             raise ValueError("model_dir required for solve_disk_df")
         root = Path(self.model_dir)
-        runner = LegacyRunner(root)
-        ensure_disk_df(self.model, root, runner)
+        self.model = ensure_disk_df(self.model, root, backend=backend)
         self.disk_correction = read_disk_correction(root / "cordbh.dat")
         return self.disk_correction
 
@@ -240,31 +240,19 @@ class GalaxyBuilder:
         work_dir: str | None = None,
         cleanup: bool = True,
         external_halo_path: str | Path | None = None,
+        stream_output: bool = False,
+        backend: str | None = None,
+        progress_log=None,
+        on_stage=None,
+        use_openmp: bool = True,
+        n_openmp_threads: int = 0,
+        run_diskdf: bool = True,
     ) -> dict[str, ParticleSet]:
         """
-        Sample N-body particles via legacy ``gendisk`` / ``genhalo`` / ``genbulge``.
+        Sample N-body particles via the Python or legacy samplers.
 
-        Parameters
-        ----------
-        n_disk, n_halo, n_bulge : int
-            Particle counts (zero skips a component).
-        seed : int
-            RNG seed passed to all components.
-        center : bool
-            Center each component on the origin.
-        work_dir : str, optional
-            Run directory; uses a temp dir if omitted.
-        cleanup : bool
-            Delete temporary work directory after sampling.
-        external_halo_path : path-like, optional
-            If set, load halo particles from this file (e.g. ``Xhalo``) instead
-            of calling ``genhalo``.  Use with the halo-first workflow when the
-            halo is specified by an existing N-body set.
-
-        Returns
-        -------
-        dict[str, ParticleSet]
-            Keys ``"disk"``, ``"halo"``, ``"bulge"`` for components sampled.
+        Uses :func:`~galacticsics.sampling.sampler.sample_galaxy` with the
+        campaign / default physics backend (Python unless overridden).
         """
         from galacticsics.io.formats import read_particles_ascii
         from galacticsics.sampling.sampler import SampleConfig, sample_galaxy
@@ -283,6 +271,9 @@ class GalaxyBuilder:
             seed_halo=seed,
             seed_bulge=seed,
             center=center,
+            use_openmp=use_openmp,
+            n_openmp_threads=n_openmp_threads,
+            run_diskdf=run_diskdf,
         )
         result = sample_galaxy(
             self.model,
@@ -290,6 +281,10 @@ class GalaxyBuilder:
             work_dir=Path(work_dir) if work_dir else None,
             artifact_dir=artifact,
             cleanup=cleanup,
+            stream_output=stream_output,
+            backend=backend,
+            progress_log=progress_log,
+            on_stage=on_stage,
         )
         self.particles = result.particles
         if external_halo_path is not None:

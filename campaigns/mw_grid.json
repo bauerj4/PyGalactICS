@@ -1,0 +1,15 @@
+{
+  "name": "mw_grid_screening",
+  "base": "reference_disk_halo",
+  "axes": {
+    "halo.v0": [3.4, 3.7],
+    "disk.mass": [14.0, 17.0]
+  },
+  "omit_components": [
+    [],
+    ["bulge"]
+  ],
+  "coarse_grid": true,
+  "max_points": 50,
+  "physics_backend": "python"
+}

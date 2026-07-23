@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from ntropy.analysis.density import DensityProfile, bin_spherical_density, compare_density_profiles
+from ntropy.benchmark.mpi_subprocess import mpirun_env
 from ntropy.analysis.disk_density import SurfaceDensityProfile, bin_midplane_surface_density
 from ntropy.config import ForceConfig, IntegratorConfig, ParallelConfig, RunConfig
 from ntropy.ics.composite import CompositeICSpec, sample_composite
@@ -152,7 +153,14 @@ def test_mpi_multirank_component_density_matches_serial(tmp_path):
         str(state_path),
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, cwd=Path(__file__).resolve().parents[3])
+    # mpirun_env disables the vader single-copy mechanism (CMA), which fails
+    # silently on WSL2 when mpirun is spawned from an MPI-initialized parent.
+    subprocess.run(
+        cmd,
+        check=True,
+        cwd=Path(__file__).resolve().parents[3],
+        env=mpirun_env(Path(sys.executable).resolve().parent),
+    )
 
     with np.load(out_path, allow_pickle=True) as data:
         mpi_final = ParticleState.from_arrays(

@@ -131,8 +131,11 @@ def read_harmonic_potential(path: PathLike) -> HarmonicPotential:
         floats = _parse_floats(content)
         if not floats:
             continue
-        if len(floats) == 6 and all(abs(v) <= 1 and v == int(v) for v in floats):
-            flags = [int(v) for v in floats]
+        if line.lstrip().startswith("#"):
+            if len(floats) == 6 and all(v in (0.0, 1.0) and v == int(v) for v in floats):
+                flags = [int(v) for v in floats]
+            else:
+                header_vals.append(floats)
         else:
             header_vals.append(floats)
 
@@ -195,7 +198,13 @@ def read_harmonic_potential(path: PathLike) -> HarmonicPotential:
     _, apot, next_idx = _read_data_block(lines, next_idx, nr, n_harm)
     while next_idx < len(lines) and _parse_harmonic_row(lines[next_idx], n_harm) is None:
         next_idx += 1
-    _, fr, _ = _read_data_block(lines, next_idx, nr, n_harm)
+    _, fr, next_idx = _read_data_block(lines, next_idx, nr, n_harm)
+    fr2 = None
+    while next_idx < len(lines) and _parse_harmonic_row(lines[next_idx], n_harm) is None:
+        next_idx += 1
+    if next_idx < len(lines) and _parse_harmonic_row(lines[next_idx], n_harm) is not None:
+        _, fr2_coeffs, next_idx = _read_data_block(lines, next_idx, nr, n_harm)
+        fr2 = fr2_coeffs
 
     model = GalaxyModel(
         halo=NFWHalo(r_outer=chalo, v0=v0, a=a, enabled=bool(flags[4])),
@@ -252,6 +261,7 @@ def read_harmonic_potential(path: PathLike) -> HarmonicPotential:
         adens=adens,
         apot=apot,
         fr=fr,
+        fr2=fr2,
     )
 
 
@@ -365,11 +375,16 @@ def merge_harmonic_potentials(
         adens=halo.adens + baryon.adens,
         apot=halo.apot + baryon.apot,
         fr=halo.fr + baryon.fr,
+        fr2=(
+            halo.fr2 + baryon.fr2
+            if halo.fr2 is not None and baryon.fr2 is not None
+            else None
+        ),
     )
 
 
 def write_harmonic_potential(potential: HarmonicPotential, path: PathLike) -> None:
-    """Write dbh.dat format (compatible with legacy readharmfile)."""
+    """Write dbh.dat format (compatible with legacy ``readharmfile`` / ``getfreqs``)."""
     p = potential
     m = p.model
     g = m.grid
@@ -377,58 +392,76 @@ def write_harmonic_potential(potential: HarmonicPotential, path: PathLike) -> No
     lines: list[str] = []
 
     def hdr(label: str, values: str) -> None:
-        lines.append(f"# {label}")
-        lines.append(f"# {values}")
+        lines.append(f" # {label}")
+        lines.append(f" #{values}")
 
+    h = m.halo
     hdr(
         "chalo,v0,a,nnn,v0bulge,abulge,dr,nr,lmax=",
-        f"{m.halo.r_outer if m.halo else 0:12.5f} {m.halo.v0 if m.halo else 0:12.4f} "
-        f"{m.halo.a if m.halo else 0:12.3f} {m.bulge.n_sersic if m.bulge else 0:12.4f} "
-        f"{m.bulge.v0 if m.bulge else 0:12.4f} {m.bulge.a if m.bulge else 0:12.4f} "
-        f"{g.dr:12.5E} {g.nr:5d} {g.lmax:4d}",
+        f"{(h.r_outer if h else 0):15.5f}{(h.v0 if h else 0):15.4f}{(h.a if h else 0):15.3f}"
+        f"{(m.bulge.n_sersic if m.bulge else 0):15.4f}{(m.bulge.v0 if m.bulge else 0):15.4f}"
+        f"{(m.bulge.a if m.bulge else 0):15.4f}{g.dr:15.5f}{g.nr:6d}{g.lmax:4d}",
     )
     hdr(
         "psi0, haloconst, bulgeconst:",
-        f"{p.psi0:12.6f} {p.haloconst:12.8E} {p.bulgeconst:12.8E}",
+        f"{p.psi0:15.6f}{p.haloconst:15.8E}{p.bulgeconst:15.8E}",
     )
     d = m.disk
     hdr(
         "Mdisk, rdisk, zdisk, outdisk, drtrunc",
-        f"{d.mass if d else 0:12.5f} {d.scale_length if d else 0:12.4f} "
-        f"{d.scale_height if d else 0:12.5f} {d.outer_radius if d else 0:12.5f} "
-        f"{d.trunc_width if d else 0:12.4f} {d.hole_radius if d else 0:12.4f} "
-        f"{d.core_radius if d else 0:12.4f}",
+        f"{(d.mass if d else 0):15.5f}{(d.scale_length if d else 0):15.4f}"
+        f"{(d.scale_height if d else 0):15.5f}{(d.outer_radius if d else 0):15.5f}"
+        f"{(d.trunc_width if d else 0):15.4f}{(d.hole_radius if d else 0):15.4f}"
+        f"{(d.core_radius if d else 0):15.4f}",
     )
     d2 = m.disk2
     hdr(
         "Mdisk2, rdisk2, zdisk2, outdisk2, drtrunc2",
-        f"{d2.mass if d2 else 0:12.4f} {d2.scale_length if d2 else 0:12.4f} "
-        f"{d2.scale_height if d2 else 0:12.4f} {d2.outer_radius if d2 else 0:12.4f} "
-        f"{d2.trunc_width if d2 else 0:12.4f}",
+        f"{(d2.mass if d2 else 0):15.4f}{(d2.scale_length if d2 else 0):15.4f}"
+        f"{(d2.scale_height if d2 else 0):15.4f}{(d2.outer_radius if d2 else 0):15.4f}"
+        f"{(d2.trunc_width if d2 else 0):15.4f}",
     )
     gas = m.gas
     hdr(
         "Mgas, rg, zg, outg, drtruncg,rzg,zgmax,gam",
-        f"{gas.mass if gas else 0:12.4f} {gas.scale_length if gas else 0:12.4f} "
-        f"{gas.outer_radius if gas else 0:12.4f} {gas.z_scale if gas else 0:12.4f} "
-        f"{gas.trunc_width if gas else 0:12.4f} {gas.rz_scale if gas else 0:12.4f} "
-        f"{gas.z_max if gas else 0:12.4f} {gas.gamma if gas else 0:12.4f}",
+        f"{(gas.mass if gas else 0):15.4f}{(gas.scale_length if gas else 0):15.4f}"
+        f"{(gas.outer_radius if gas else 0):15.4f}{(gas.z_scale if gas else 0):15.4f}"
+        f"{(gas.trunc_width if gas else 0):15.4f}{(gas.rz_scale if gas else 0):15.4f}"
+        f"{(gas.z_max if gas else 0):15.4f}{(gas.gamma if gas else 0):15.4f}",
     )
     hdr(
         "psic, psi0-psid, bhmass",
-        f"{p.psic:12.4f} {p.psi0 - p.psid:12.5E} {m.black_hole.mass:12.4f}",
+        f"{p.psic:15.4f}{(p.psi0 - p.psid):15.5E}{m.black_hole.mass:15.4f}",
     )
     lines.append(
-        f"# {int(flags.disk):4d} {int(flags.disk2):4d} {int(flags.gas):4d} "
+        f" # {int(flags.disk):4d} {int(flags.disk2):4d} {int(flags.gas):4d} "
         f"{int(flags.bulge):4d} {int(flags.halo):4d} {int(flags.black_hole):4d}"
     )
-    lines.append("#  OUTPUT FROM DBH8. TOTAL POTENTIAL.")
+    lines.append(" #  OUTPUT FROM DBH8. TOTAL POTENTIAL.")
 
     n_harm = g.lmax // 2 + 1
-    for arr in (p.adens, p.apot, p.fr):
+
+    def _harm_row(radius: float, coeffs: np.ndarray) -> str:
+        values = [radius, *[float(coeffs[i]) for i in range(n_harm)]]
+        return "".join(f"{v:16.8f}" for v in values)
+
+    coeff_blocks: list[np.ndarray] = [p.adens, p.apot, p.fr]
+    if p.fr2 is not None:
+        coeff_blocks.append(p.fr2)
+    for bi, arr in enumerate(coeff_blocks):
+        if bi > 0:
+            lines.extend(["", ""])
         for ir in range(g.nr + 1):
-            vals = " ".join(f"{arr[i, ir]:16.8E}" for i in range(n_harm))
-            lines.append(f"  {p.radii[ir]:16.8E} {vals}")
+            lines.append(_harm_row(float(p.radii[ir]), arr[:, ir]))
+
+    if flags.disk and m.disk is not None:
+        from galacticsics.potential.poisson.densities import disk_surface_density
+
+        lines.extend(["", ""])
+        for ir in range(g.nr + 1):
+            r = ir * g.dr
+            sigma = disk_surface_density(r, m)
+            lines.append(f"{r:16.8f}{sigma:16.8f}{0.0:16.8f}")
 
     Path(path).write_text("\n".join(lines) + "\n")
 
@@ -456,6 +489,73 @@ def read_disk_correction(path: PathLike):
         f_d=np.asarray(fdrat, dtype=float),
         f_sz=np.asarray(fszrat, dtype=float),
     )
+
+
+def cordbh_is_valid(path: PathLike, *, min_f_d: float = 0.1) -> bool:
+    """
+    Return True when ``cordbh.dat`` is non-empty, readable, and physically usable.
+
+    Legacy ``diskdf`` can exit 0 after poor convergence, leaving ``f_d`` clipped
+    to the ``1e-3`` floor — finite but unusable for ``gendisk``.
+    """
+    p = Path(path)
+    if not p.is_file() or p.stat().st_size == 0:
+        return False
+    try:
+        corr = read_disk_correction(p)
+    except (ValueError, OSError, IndexError):
+        return False
+    if corr.radius.size < 6:
+        return False
+    if not (np.all(np.isfinite(corr.f_d)) and np.all(np.isfinite(corr.f_sz))):
+        return False
+    # Reject collapsed correction (disk DF would sample near-static orbits).
+    if float(np.median(corr.f_d[1:])) < min_f_d:
+        return False
+    if float(np.median(corr.f_d[1:])) > 10.0:
+        return False
+    if float(np.max(corr.f_d[1:])) > 1.65:
+        return False
+    return True
+
+
+def cordbh_needs_refresh(work_dir: PathLike) -> bool:
+    """True when ``cordbh.dat`` is missing or older than ``dbh.dat``."""
+    work_dir = Path(work_dir)
+    cordbh = work_dir / "cordbh.dat"
+    dbh = work_dir / "dbh.dat"
+    if not dbh.is_file():
+        return False
+    if not cordbh.is_file():
+        return True
+    return cordbh.stat().st_mtime < dbh.stat().st_mtime
+
+
+def write_frequency_table(
+    path: PathLike,
+    *,
+    radius: np.ndarray,
+    omega_h: np.ndarray,
+    nu_h: np.ndarray,
+    sigma_d: np.ndarray,
+    v_circ_total: np.ndarray,
+    v_circ_bulge: np.ndarray,
+    nu_bulge: np.ndarray,
+    psi_midplane: np.ndarray,
+    d2psi_dr2: np.ndarray,
+) -> None:
+    """Write ``freqdbh.dat`` in legacy ``getfreqs`` layout."""
+    lines = [
+        "#       RADIUS       OMEGA_H         NU_H      SIGMA_D       VC_TOT         VC_B          NU_B    PSIMAJ_TOT        PSI''",
+        "#",
+    ]
+    for i in range(len(radius)):
+        lines.append(
+            f"{radius[i]:16.8f} {omega_h[i]:16.8f} {nu_h[i]:16.8f} {sigma_d[i]:16.8f} "
+            f"{v_circ_total[i]:16.8f} {v_circ_bulge[i]:16.8f} {nu_bulge[i]:16.8f} "
+            f"{psi_midplane[i]:16.8f} {d2psi_dr2[i]:16.8f}"
+        )
+    Path(path).write_text("\n".join(lines) + "\n")
 
 
 def read_frequency_table(path: PathLike):

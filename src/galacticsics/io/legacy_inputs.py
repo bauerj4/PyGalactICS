@@ -188,7 +188,7 @@ def write_genbulge_input(
     n_particles: int,
     seed: int = -1,
     center: bool = True,
-    streaming: float = 0.0,
+    streaming: float = 0.5,
 ) -> None:
     """Write stdin lines for ``genbulge`` (same prompt order as ``genhalo``)."""
     path.write_text(f"{streaming}\n{n_particles}\n{seed}\n{int(center)}\n")

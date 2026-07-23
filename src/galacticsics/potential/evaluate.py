@@ -30,7 +30,7 @@ from typing import Tuple
 
 import numpy as np
 
-from galacticsics.numerics import legendre_even_l
+from galacticsics.numerics import legendre_even_l, sech2_stable
 from galacticsics.potential.harmonics import HarmonicPotential
 
 
@@ -55,21 +55,21 @@ def _disk_surface_density(r: float, disk) -> float:
 
 def _disk_vertical_factor(z: float, zdisk: float) -> float:
     """Sech^2 vertical factor g(z) used in appdiskpot."""
-    zz = abs(z) / zdisk
-    return 0.5 / zdisk / math.cosh(zz) ** 2
+    if zdisk <= 0.0:
+        return 0.0
+    return 0.5 / zdisk * sech2_stable(z / zdisk)
 
 
 def approximate_disk_potential(potential: HarmonicPotential, s: float, z: float) -> float:
     """Approximate stellar disk potential (appdiskpot.f)."""
-    disk = potential.model.disk
-    if disk is None or not disk.enabled:
-        return 0.0
-    r = math.hypot(s, z)
-    f = _disk_surface_density(r, disk)
-    if f == 0.0:
-        return 0.0
-    g = _disk_vertical_factor(z, disk.scale_height)
-    return -4.0 * math.pi * f * disk.scale_height * g / 2.0
+    return approximate_disk_potential_from_model(potential.model, s, z)
+
+
+def approximate_disk_potential_from_model(model, s: float, z: float) -> float:
+    """Approximate stellar disk potential without building a :class:`HarmonicPotential`."""
+    from galacticsics.potential.poisson.appdisk import approximate_disk_potential
+
+    return approximate_disk_potential(s, z, model)
 
 
 def approximate_disk2_potential(potential: HarmonicPotential, s: float, z: float) -> float:

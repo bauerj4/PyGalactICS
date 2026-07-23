@@ -2,29 +2,9 @@
  * bh_tree.h — Barnes–Hut octree for ntropy (C API)
  *
  * Flat, index-based octree used by the Python extension ntropy.forces._bh_c.
- * Physics matches ntropy.forces.bhtree (Python reference):
+ * Physics matches ntropy.forces.bhtree (Python reference).
  *
- *   - Monopole cell approximation when (size / distance) < theta
- *   - Leaf cells: pairwise Plummer sum with h_ij = 0.5 * (eps_i + eps_j)
- *   - Opened cells: monopole with h = eps_target
- *   - Self-interactions excluded; G = NTROPY_BH_G (1.0)
- *
- * Memory model
- * ------------
- * BHTree stores nodes in a growable array (indices, not pointers) so realloc
- * never invalidates parent/child links.  bh_tree_build copies pos/mass/eps
- * into owned buffers (owns_particle_arrays = 1).  bh_tree_from_packed binds
- * external particle arrays for the MPI unpack path.
- *
- * MPI phase 1 (see PARALLEL.md)
- * -----------------------------
- *   rank 0: bh_tree_build → pack via Python pack_buffers → MPI_Bcast
- *   all ranks: bh_tree_from_packed → bh_tree_accel_targets(local_targets)
- *
- * Packed node row (19 doubles, NODE_PACK_WIDTH in bh_module.c)
- * ------------------------------------------------------------
- *   [0:3] center, [3:6] com, [6] size, [7] mass, [8] is_leaf,
- *   [9:17] child[8], [17] leaf_start, [18] leaf_count
+ * Optional optimizations are controlled by BHTreeOpts (all off = legacy behaviour).
  */
 
 #ifndef NTROPY_BH_TREE_H
@@ -34,7 +14,23 @@
 
 #define NTROPY_BH_G 1.0
 #define NTROPY_BH_MIN_LEAF_SIZE 1e-12
-#define NTROPY_BH_MAX_WALK_STACK 128
+#define NTROPY_BH_MAX_WALK_STACK 256
+
+#define NTROPY_BH_PACK_LEGACY 0
+#define NTROPY_BH_PACK_NATIVE 1
+
+typedef struct {
+    int fast_inv_r3;
+    int squared_opening;
+    int iterative_walk;
+    int morton_build;
+    int borrow_arrays;
+    int fast_coincident_check;
+    int native_pack;
+    int accel_all_fast;
+    int simd_leaves;
+    int omp_schedule; /* 0=static, 1=guided, 2=dynamic */
+} BHTreeOpts;
 
 typedef struct {
     double center[3];
@@ -59,18 +55,25 @@ typedef struct {
     double *mass;
     double *eps;
     int owns_particle_arrays;
+    BHTreeOpts opts;
 } BHTree;
+
+/* Default opts: all optimizations disabled (legacy). */
+void bh_tree_opts_default(BHTreeOpts *opts);
 
 /*
  * bh_tree_build — allocate and populate an octree from N particles.
- * Copies pos/mass/eps into owned buffers.  Returns 0 on success, -1 on error.
+ * Copies pos/mass/eps unless opts->borrow_arrays is set.
  */
-int bh_tree_build(BHTree *tree, const double *pos, const double *mass, const double *eps, int n);
+int bh_tree_build(
+    BHTree *tree,
+    const double *pos,
+    const double *mass,
+    const double *eps,
+    int n,
+    const BHTreeOpts *opts
+);
 
-/*
- * bh_tree_from_packed — reconstruct tree topology from flat node + leaf buffers.
- * Does not copy pos/mass/eps (caller keeps arrays alive).  Returns 0 / -1.
- */
 int bh_tree_from_packed(
     BHTree *tree,
     const BHNode *nodes,
@@ -80,16 +83,12 @@ int bh_tree_from_packed(
     const double *pos,
     const double *mass,
     const double *eps,
-    int n_particles
+    int n_particles,
+    const BHTreeOpts *opts
 );
 
-/* bh_tree_free — release nodes, leaf pool, and owned particle copies. */
 void bh_tree_free(BHTree *tree);
 
-/*
- * bh_tree_pack — deep-copy nodes and leaf_indices for C-level serialization.
- * Python wrapper uses pack_buffers() instead; kept for tests / future MPI C API.
- */
 int bh_tree_pack(
     const BHTree *tree,
     BHNode **out_nodes,
@@ -98,10 +97,6 @@ int bh_tree_pack(
     int *out_n_leaf_indices
 );
 
-/*
- * bh_tree_accel_one — acceleration on a single target index.
- * pos/eps may differ from build-time arrays (integrator trial positions).
- */
 void bh_tree_accel_one(
     const BHTree *tree,
     int target_index,
@@ -111,15 +106,18 @@ void bh_tree_accel_one(
     double acc_out[3]
 );
 
-/*
- * bh_tree_accel_targets — accelerations for many targets.
- * acc_out layout: [ax0, ay0, az0, ax1, ay1, az1, ...], length 3 * n_targets.
- * Returns 0 on success, -1 on invalid arguments.
- */
 int bh_tree_accel_targets(
     const BHTree *tree,
     const int *target_indices,
     int n_targets,
+    double theta,
+    const double *pos,
+    const double *eps,
+    double *acc_out
+);
+
+int bh_tree_accel_all(
+    const BHTree *tree,
     double theta,
     const double *pos,
     const double *eps,

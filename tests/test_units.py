@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.essential
+
 from galacticsics import DEFAULT_UNITS, UnitSystem
 from galacticsics.models import GalaxyModel
 from galacticsics.units import (

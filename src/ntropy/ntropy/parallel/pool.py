@@ -6,7 +6,8 @@ from typing import Literal
 
 import numpy as np
 
-from ntropy.parallel.mpi import compute_forces_mpi
+from ntropy.config import BhOptimizationsConfig
+from ntropy.parallel.mpi import compute_forces_mpi, MpiForceCache
 
 
 def compute_forces_parallel(
@@ -17,6 +18,10 @@ def compute_forces_parallel(
     method: Literal["brute", "bh", "bh_c"] = "bh",
     theta: float = 0.5,
     n_workers: int = 1,
+    bh_opts: BhOptimizationsConfig | None = None,
+    cache: MpiForceCache | None = None,
+    rebuild: bool = True,
+    mpi_local_trees: bool = True,
 ) -> np.ndarray:
     """
     Compute forces using MPI domain decomposition.
@@ -36,6 +41,8 @@ def compute_forces_parallel(
     n_workers : int
         Retained for JSON compatibility. When running under ``mpirun``,
         the MPI communicator size overrides this value.
+    mpi_local_trees : bool
+        Gadget-style local trees + LET under MPI (default True).
 
     Returns
     -------
@@ -43,4 +50,14 @@ def compute_forces_parallel(
         Accelerations.
     """
     del n_workers  # MPI communicator size defines worker count
-    return compute_forces_mpi(pos, mass, eps, method=method, theta=theta)
+    return compute_forces_mpi(
+        pos,
+        mass,
+        eps,
+        method=method,
+        theta=theta,
+        bh_opts=bh_opts,
+        cache=cache,
+        rebuild=rebuild,
+        mpi_local_trees=mpi_local_trees,
+    )
