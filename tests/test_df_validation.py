@@ -40,9 +40,9 @@ def sampled_work_dir(tmp_path_factory) -> Path:
     if (ref / "cordbh.dat").is_file():
         shutil.copy2(ref / "cordbh.dat", work / "cordbh.dat")
     else:
-        from galacticsics.distribution.diskdf_solve import solve_diskdf_python
+        from galacticsics.physics.python_backend import python_ensure_disk_df
 
-        solve_diskdf_python(model, work, n_iterations=1, n_radial_steps=12)
+        python_ensure_disk_df(model, work)
     sample_galaxy(
         model,
         SampleConfig(n_disk=96, n_halo=96, run_diskdf=False),
@@ -84,8 +84,9 @@ def test_validate_disk_df_passes(sampled_state: ParticleState, sampled_model: Ga
     assert report["n"] == 96
     assert report["pass"]
     assert report["cordbh_valid"]
-    assert report["df_positive_frac"] >= 0.99
+    assert report["df_positive_frac"] >= report["thresholds"]["df_positive_frac"]
     assert report["surface_density_max_rel"] <= report["thresholds"]["surface_density_max_rel"]
+    assert report["cordbh_f_sz_min"] >= report["thresholds"]["cordbh_f_sz_min"]
 
 
 @pytest.mark.physics_python

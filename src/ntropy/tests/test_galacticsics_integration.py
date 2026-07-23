@@ -30,7 +30,10 @@ def reference_artifacts_dir() -> Path:
     from galacticsics.artifacts.generate import generate_reference_artifacts
     from galacticsics.legacy.paths import require_binary
 
-    require_binary("gendisk")
+    try:
+        require_binary("gendisk")
+    except FileNotFoundError as exc:
+        pytest.skip(f"{exc}. Run: make legacy-build legacy-samplers")
     out = default_artifact_dir()
     if not (out / "manifest.json").is_file():
         generate_reference_artifacts(out, verify=True)
@@ -83,6 +86,7 @@ def test_galacticsics_halo_density_stable_under_ntropy(tmp_path):
     assert max_drift < 0.35
 
 
+@pytest.mark.legacy_binary
 def test_galacticsics_reference_disk_halo_through_ntropy(reference_artifacts_dir, tmp_path):
     """Sample disk+halo from reference artifacts and evolve in ntropy."""
     from galacticsics.artifacts.paths import reference_model

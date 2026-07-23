@@ -113,7 +113,9 @@ def test_openmp_disk_velocity_stats_mw_coarse(tmp_path: Path) -> None:
     omp_speeds = np.sqrt(omp.data["vx"] ** 2 + omp.data["vy"] ** 2 + omp.data["vz"] ** 2)
     assert omp_speeds.max() < 6.0
     assert omp_speeds.max() / np.median(omp_speeds) < 5.0
-    assert omp_speeds.max() == pytest.approx(py_speeds.max(), rel=0.35)
+    # Max is a rare hot outlier; compare bulk speed moments instead.
+    assert np.median(omp_speeds) == pytest.approx(np.median(py_speeds), rel=0.15)
+    assert np.percentile(omp_speeds, 99) == pytest.approx(np.percentile(py_speeds, 99), rel=0.25)
     assert _mean_v_phi(omp.data) > 0.8
     assert _mean_v_phi(py.data) > 0.8
     state = merge_galacticsics_components({"disk": omp})
@@ -134,7 +136,8 @@ def test_openmp_disk_velocity_stats_match_python(tmp_path: Path) -> None:
     omp_speeds = np.sqrt(omp.data["vx"] ** 2 + omp.data["vy"] ** 2 + omp.data["vz"] ** 2)
     assert omp_speeds.max() < 6.5
     assert omp_speeds.max() / np.median(omp_speeds) < 5.5
-    assert omp_speeds.max() == pytest.approx(py_speeds.max(), rel=0.35)
+    assert np.median(omp_speeds) == pytest.approx(np.median(py_speeds), rel=0.15)
+    assert np.percentile(omp_speeds, 99) == pytest.approx(np.percentile(py_speeds, 99), rel=0.25)
 
 
 def _mean_v_phi(data) -> float:
