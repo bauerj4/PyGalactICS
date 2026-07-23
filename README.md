@@ -255,7 +255,8 @@ From the repository root:
 | `make install-system-mpi` | Install OpenMPI packages (`scripts/ensure_openmpi.sh`) |
 | `make generate-artifacts` | Run `dbh` + `diskdf` + sampling → `tests/generated/reference/` |
 | `make legacy-build` | Compile `legacy/fortran` → `legacy/bin/` |
-| `make test` | Run `pytest tests/ src/ntropy/tests/` (full galacticsics + ntropy suite) |
+| `make test` | Full pytest (excludes `legacy_binary`) |
+| `make test-essential` | Fast PR gate (`-m essential`; see [`docs/ci_essential.md`](docs/ci_essential.md)) |
 | `make example-mw` | Load Milky Way `dbh.dat`, print potential samples |
 | `make example-solve` | Solve NFW halo via legacy `dbh` |
 | `make example-sample` | Sample 500 disk+halo particles from Milky Way model |
@@ -720,18 +721,37 @@ imposed.
 
 ## Testing
 
-Run the **full suite** (galacticsics + ntropy) from the repository root:
+### Essential PR gate (CI on pull requests)
+
+High-signal, fast checks that must pass before merge. Same command as GitHub Actions
+on `pull_request` — see [`docs/ci_essential.md`](docs/ci_essential.md).
+
+```bash
+make test-essential
+# equivalent:
+pytest tests/ src/ntropy/tests/ -v --tb=short -m "essential and not legacy_binary and not slow"
+```
+
+Covers bulge IC equilibrium, OpenMP sampling smoke, core Python physics, BH-C,
+Plummer virial, and units/numerics. **Not** included: `slow`, `legacy_binary`,
+GPU BH (needs CuPy locally).
+
+### Full suite
 
 ```bash
 make test
 # equivalent to:
-pytest tests/ src/ntropy/tests/ -v --tb=short
+pytest tests/ src/ntropy/tests/ -v --tb=short -m "not legacy_binary"
 ```
 
-**Prerequisites:** `make install-dev` (venv, legacy binaries, generated reference
-artifacts in `tests/generated/reference/`). Some ntropy tests require **mpi4py**
-and **mpirun**; C BH tests require the compiled `_bh_c` extension (skipped if
+**Prerequisites:** `make install-dev` (venv, OpenMP C extensions via
+`python setup.py build_ext --inplace`, generated reference artifacts in
+`tests/generated/reference/`). Some ntropy tests require **mpi4py** and
+**mpirun**; C BH tests require the compiled `_bh_c` extension (skipped if
 missing). MPI multi-rank tests are skipped when `mpirun` is unavailable.
+
+**Usage notebook:** [`notebooks/gpu_bh_dbh.ipynb`](notebooks/gpu_bh_dbh.ipynb) —
+DBH ICs → OpenMP sampling → GPU Barnes–Hut evolution, including IC virial checks.
 
 ---
 

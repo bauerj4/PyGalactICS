@@ -16,6 +16,8 @@ from galacticsics.potential.solver import solve_potential
 from galacticsics.io import read_harmonic_potential
 from galacticsics.sampling.sampler import SampleConfig, sample_galaxy
 
+pytestmark = [pytest.mark.essential, pytest.mark.physics_python]
+
 
 def _bulge_halo_model(*, dr: float = 0.1, nr: int = 80) -> GalaxyModel:
     return GalaxyModel(

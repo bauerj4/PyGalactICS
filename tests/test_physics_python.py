@@ -52,6 +52,7 @@ def python_work_dir() -> Path:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_python_solve_writes_dbh(python_work_dir: Path) -> None:
     assert (python_work_dir / "dbh.dat").is_file()
     assert (python_work_dir / "h.dat").is_file()
@@ -145,6 +146,7 @@ def test_python_bulge_disk_halo_solve(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_vectorized_halo_density_matches_scalar() -> None:
     """Array halo density evaluation matches the scalar API."""
     from galacticsics.potential.poisson.densities import halo_density_spherical, halo_density_spherical_array
@@ -187,6 +189,7 @@ def test_python_sample_halo_large_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_python_sample_bulge(tmp_path: Path) -> None:
     """Bulge rejection sampling produces the requested particle count."""
     from galacticsics.models import NFWHalo, SersicBulge
@@ -217,6 +220,7 @@ def test_python_sample_bulge(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_sersic_force_matches_monopole_enclosed_mass() -> None:
     """sersic_force must use Γ×P once (double-Γ made denspsibulge ~10⁻⁷)."""
     from galacticsics.models import NFWHalo, SersicBulge
@@ -241,6 +245,7 @@ def test_sersic_force_matches_monopole_enclosed_mass() -> None:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_sersic_df_table_not_vanishing(tmp_path: Path) -> None:
     """Bulge DF ρ(ψ) must be comparable to halo (not ~10⁻⁷ from force bug)."""
     from galacticsics.models import NFWHalo, SersicBulge

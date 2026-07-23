@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ntropy.ics.plummer import plummer_df, plummer_density, sample_plummer
 from ntropy.ics.spherical import abel_df_plummer, eddington_df
 from ntropy.softening import kinetic_energy, softened_potential_energy
+
+pytestmark = pytest.mark.essential
 
 
 def test_abel_matches_analytic_plummer_df():

@@ -20,12 +20,17 @@ from ntropy.config import ForceConfig
 cfg.force = ForceConfig(method="gpu_bh", theta=0.5)
 ```
 
+**Full usage walkthrough:** [`notebooks/gpu_bh_dbh.ipynb`](../../../../notebooks/gpu_bh_dbh.ipynb)
+(DBH ICs → OpenMP sampling → GPU BH evolution + IC potential-virial check).
+
 ## IC Poisson solver (GalactICS)
 
 N-body `gpu_bh` is separate from the **IC multipole Poisson** path in
 `galacticsics`. Polar shell integration defaults to **OpenMP on all CPUs** when
 the C extension is built (`GALACTICSICS_POISSON_THREADS` unset). Force serial
-Python with `GALACTICSICS_POISSON_THREADS=0`. Optional CuPy batching:
+Python with `GALACTICSICS_POISSON_THREADS=0`. Particle sampling (disk/halo/bulge)
+also defaults to OpenMP `_sampler_c` — see [`ic_sampling.md`](../../../../docs/ic_sampling.md).
+Optional CuPy batching for the Poisson polar fill:
 
 ```bash
 GALACTICSICS_POISSON_GPU=1 GALACTICSICS_POISSON_THREADS=0 python scripts/benchmark_solve.py --gpu

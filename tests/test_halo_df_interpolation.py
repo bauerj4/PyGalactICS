@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.essential
+
 from galacticsics.diagnostics.df_validation import _read_log_df_table
 from galacticsics.physics.backend import PhysicsBackendKind
 from galacticsics.potential.solver import solve_potential

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
+pytestmark = pytest.mark.essential
 from scipy import integrate
 
 from galacticsics.io import read_disk_correction

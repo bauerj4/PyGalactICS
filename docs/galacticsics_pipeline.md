@@ -8,7 +8,11 @@ match the legacy Fortran/C numerics; legacy routine names are cited where they h
 navigate `legacy/fortran/`.
 
 For Python-backend performance knobs and the `dbh.dat` variable glossary, see
-[`dbh_python_backend.md`](dbh_python_backend.md).
+[`dbh_python_backend.md`](dbh_python_backend.md). For OpenMP particle sampling,
+bulge DF equilibrium, and potential-based virial checks, see
+[`ic_sampling.md`](ic_sampling.md). End-to-end GPU BH usage:
+[`notebooks/gpu_bh_dbh.ipynb`](../notebooks/gpu_bh_dbh.ipynb). PR CI gate:
+[`ci_essential.md`](ci_essential.md).
 
 ---
 
@@ -21,7 +25,7 @@ flowchart LR
     GM[GalaxyModel] --> DBH[solve dbh]
     DBH --> FREQ[getfreqs]
     FREQ --> DDF[diskdf]
-    DDF --> SAMP[sample gendisk/genhalo]
+    DDF --> SAMP[sample gendisk/genhalo/genbulge]
     SAMP --> NTP[ntropy evolve]
 
     DBH --> ART1[(dbh.dat h.dat mr.dat)]
@@ -39,7 +43,7 @@ flowchart LR
 | Poisson solve | `solve_potential()` → `python_solve_potential()` | `dbh` | `dbh.dat`, `h.dat`, `mr.dat`, `rtidal.dat`, DF tables |
 | Frequencies | `tabulate_frequencies()` | `getfreqs` | `freqdbh.dat` |
 | Disk DF | `python_ensure_disk_df()` → `solve_diskdf_python()` | `diskdf` | `cordbh.dat`, `toomre2.5` |
-| Sampling | `GalaxyBuilder.sample()` → `sample_*_python()` | `gendisk`, `genhalo`, `genbulge` | `disk`, `halo`, `bulge` (ASCII particles) |
+| Sampling | `GalaxyBuilder.sample()` → `sample_*_python()` (OpenMP `_sampler_c` by default) | `gendisk`, `genhalo`, `genbulge` | `disk`, `halo`, `bulge` (ASCII particles) |
 | Stability | `ntropy.integrations.galacticsics` | — | energy drift, ρ(r), Σ(R) |
 
 The default physics backend is **Python** (`galacticsics.physics.python_backend`).
@@ -373,7 +377,9 @@ All modules live under `src/galacticsics/potential/poisson/` unless noted.
 | `physics/python_backend.py` | Wires solve → `getfreqs` → `diskdf` → sampling |
 | `physics/dispatch.py` | Selects Python vs legacy backend |
 | `distribution/diskdf_solve.py` | Python `diskdf` port |
-| `sampling/python/samplers.py` | Python `gendisk` / `genhalo` / `genbulge` |
+| `sampling/python/samplers.py` | Python `gendisk` / `genhalo` / `genbulge` (dispatches to OpenMP) |
+| `sampling/openmp/` | OpenMP C extension wrappers + pack tables |
+| `sampling/c/sampler_*.c` | OpenMP rejection kernels |
 | `builder.py` | `GalaxyBuilder` high-level orchestration |
 
 ---
@@ -481,14 +487,24 @@ floor over Gyr signals bars or spirals.  Wired in `campaign/analysis.py`,
 
 ### Virial equilibrium at $t=0$
 
-GalactICS samples velocities from the equilibrium DF, so the merged IC state
-should satisfy the virial theorem $2T + W \approx 0$ (equivalently
-$T/|W| \approx 0.5$).  `virial_diagnostic` in `ntropy.softening` reports
-`virial_ratio` $= 2T/|W|$ and flags `is_virial_equilibrium` when
-$|2T+W|/|W|$ is below a tolerance.  For $N > 16\,384$ the potential term
-uses a random subset to avoid $O(N^2)$ cost.  Campaign
-`summarize_evolution_health` includes `virial_ic_*` and `virial_final_*`
-fields for both snapshots.
+GalactICS samples velocities from the equilibrium DF in the fixed multipole
+potential $\Psi$, so the merged IC should satisfy the virial theorem against
+**that** field:
+
+$$
+2K + W \approx 0,\qquad
+W = \sum_i m_i\,\mathbf{x}_i\cdot\nabla\Psi(\mathbf{x}_i),\qquad
+K = \tfrac12\sum_i m_i v_i^2.
+$$
+
+Use :func:`galacticsics.diagnostics.virial_diagnostic_potential`
+(`2K/|W|\approx 1`). Prefer this over pairwise
+:func:`ntropy.softening.virial_diagnostic` for GalactICS ICs: softened $N$-body
+$W$ underestimates binding for a concentrated bulge and falsely reports a hot
+system. Details: [`ic_sampling.md`](ic_sampling.md).
+
+Campaign `summarize_evolution_health` still records pairwise
+`virial_ic_*` / `virial_final_*` as soft $N$-body diagnostics during evolution.
 
 ---
 
@@ -509,6 +525,9 @@ See README § *Two-step halo-first workflow* for API examples.
 ## Further reading
 
 - [`dbh_python_backend.md`](dbh_python_backend.md) — variable glossary, performance, diagnostic tests
+- [`ic_sampling.md`](ic_sampling.md) — OpenMP gen*, bulge DF, potential virial
+- [`ci_essential.md`](ci_essential.md) — essential PR pytest gate
 - [`README.md`](../README.md) — installation, examples, test matrix
+- [`notebooks/gpu_bh_dbh.ipynb`](../notebooks/gpu_bh_dbh.ipynb) — DBH → GPU BH usage notebook
 - `legacy/fortran/dbh.f`, `diskdf.f`, `gendisk.c` — reference numerics
 - [`src/ntropy/README.md`](../src/ntropy/README.md) — N-body stability tester

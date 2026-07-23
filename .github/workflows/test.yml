@@ -8,8 +8,10 @@ on:
     - cron: "0 12 * * 0"
 
 jobs:
-  pytest:
+  # Fast high-signal gate on every PR (docs/ci_essential.md).
+  essential:
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,8 +19,30 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: |
+          python -m pip install -U pip setuptools wheel
           python -m pip install -e ".[dev]"
           python -m pip install -e "src/ntropy[dev]"
+          python setup.py build_ext --inplace
+      - name: Essential PR tests
+        run: |
+          pytest tests/ src/ntropy/tests/ -v --tb=short \
+            -m "essential and not legacy_binary and not slow"
+
+  # Fuller suite on pushes to the default branch (still skips legacy binaries).
+  pytest:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip setuptools wheel
+          python -m pip install -e ".[dev]"
+          python -m pip install -e "src/ntropy[dev]"
+          python setup.py build_ext --inplace
       - name: Run tests (Python physics backend default)
         run: |
           pytest tests/ src/ntropy/tests/ -v --tb=short -m "not legacy_binary"
@@ -33,6 +57,7 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: |
+          python -m pip install -U pip setuptools wheel
           python -m pip install -e ".[dev]"
       - name: Build legacy samplers
         run: make legacy-build legacy-samplers

@@ -40,6 +40,7 @@ where = ["src"]
 pythonpath = ["."]
 testpaths = ["tests", "src/ntropy/tests"]
 markers = [
+    "essential: fast high-signal tests required on every PR (see docs/ci_essential.md)",
     "legacy_parity: compare output against legacy Fortran golden files",
     "legacy_binary: requires compiled legacy/bin executables",
     "physics_python: Python physics backend (no legacy subprocesses)",

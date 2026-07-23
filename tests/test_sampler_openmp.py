@@ -24,7 +24,9 @@ from galacticsics.sampling.python.samplers import (
 from galacticsics.sampling.sampler import SampleConfig
 
 
-pytestmark = pytest.mark.skipif(not extension_available(), reason="OpenMP sampler not built")
+pytestmark = [
+    pytest.mark.skipif(not extension_available(), reason="OpenMP sampler not built"),
+]
 
 
 def _small_work_dir(tmp_path: Path) -> Path:
@@ -52,6 +54,7 @@ def _bulge_halo_work_dir(tmp_path: Path) -> Path:
     return work
 
 
+@pytest.mark.essential
 def test_openmp_halo_matches_python(tmp_path: Path) -> None:
     work = _small_work_dir(tmp_path)
     cfg = SampleConfig(n_halo=200, use_openmp=False)
@@ -61,6 +64,7 @@ def test_openmp_halo_matches_python(tmp_path: Path) -> None:
     assert py.total_mass == pytest.approx(omp.total_mass)
 
 
+@pytest.mark.essential
 def test_openmp_disk_produces_particles(tmp_path: Path) -> None:
     work = _small_work_dir(tmp_path)
     ps = sample_disk_openmp(work, n_particles=100, seed=-3, center=True)
@@ -143,6 +147,7 @@ def _mean_v_phi(data) -> float:
     return float(np.mean((-y[ok] * vx[ok] + x[ok] * vy[ok]) / r[ok]))
 
 
+@pytest.mark.essential
 def test_cylindrical_to_cartesian_velocity_roundtrip() -> None:
     """Unit check for the (vR, vφ) → (vx, vy) convention used by gendisk."""
     import math
@@ -165,6 +170,7 @@ def test_cylindrical_to_cartesian_velocity_roundtrip() -> None:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_disk_sampler_writes_cartesian_rotation(tmp_path: Path) -> None:
     """Regression: gendisk must convert (vR, vφ) → (vx, vy), not store cylindrical as Cartesian."""
     import numpy as np
@@ -211,6 +217,7 @@ def test_disk_sampler_radial_jacobian_invu(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
+@pytest.mark.essential
 def test_openmp_bulge_matches_python_mass_and_shape(tmp_path: Path) -> None:
     import numpy as np
 

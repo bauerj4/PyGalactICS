@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.essential
+
 from ntropy.units import (
     CODE_TIME_PER_GYR,
     DEFAULT_SIM_DT,

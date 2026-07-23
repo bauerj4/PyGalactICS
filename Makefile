@@ -3,7 +3,8 @@
 # Targets:
 #   make install-dev   Python package + dev dependencies
 #   make legacy-build  Compile legacy Fortran/C binaries
-#   make test          Run pytest suite
+#   make test           Run full pytest suite
+#   make test-essential PR gate (docs/ci_essential.md)
 #   make example-mw    Milky Way potential demo
 #   make clean         Remove build artifacts
 
@@ -13,7 +14,7 @@ PIP    = $(VENV)/bin/pip
 PYTEST = $(VENV)/bin/pytest
 PY     = $(VENV)/bin/python
 
-.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test example-mw example-sample example-halo-first clean help
+.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test test-essential example-mw example-sample example-halo-first clean help
 
 all: install-dev legacy-build
 
@@ -24,7 +25,8 @@ help:
 	@echo "  generate-artifacts  Run Python dbh+diskdf+sampling -> tests/generated/reference"
 	@echo "  legacy-build   Build dbh -> legacy/bin/"
 	@echo "  legacy-samplers Build gendisk, genhalo, genbulge, diskdf, getfreqs"
-	@echo "  test           Run pytest"
+	@echo "  test           Run full pytest (excludes legacy_binary)"
+	@echo "  test-essential Fast PR gate (-m essential; see docs/ci_essential.md)"
 	@echo "  example-mw     Run examples/mw_default.py"
 	@echo "  example-solve  Run examples/solve_potential.py"
 	@echo "  example-sample Run examples/sample_galaxy.py"
@@ -69,7 +71,10 @@ legacy-clean:
 	$(MAKE) -C legacy/fortran clean
 
 test: install-dev
-	$(PYTEST) tests/ src/ntropy/tests/ -v --tb=short
+	$(PYTEST) tests/ src/ntropy/tests/ -v --tb=short -m "not legacy_binary"
+
+test-essential:
+	$(PYTEST) tests/ src/ntropy/tests/ -v --tb=short -m "essential and not legacy_binary and not slow"
 
 example-mw: install-dev
 	$(PY) examples/mw_default.py

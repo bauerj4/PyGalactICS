@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ntropy.ics.plummer import sample_plummer
 from ntropy.softening import kinetic_energy, virial_diagnostic
+
+pytestmark = pytest.mark.essential
 
 
 def test_plummer_virial_equilibrium():

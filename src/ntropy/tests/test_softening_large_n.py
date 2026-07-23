@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ntropy.softening import LARGE_N_ENERGY_THRESHOLD, kinetic_energy, total_energy
+
+pytestmark = pytest.mark.essential
 
 
 def test_total_energy_large_n_uses_kinetic_only():

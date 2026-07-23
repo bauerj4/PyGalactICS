@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.essential
+
 from ntropy.config import IntegratorConfig, RunConfig
 from ntropy.ics.plummer import sample_plummer
 from ntropy.integrators.leapfrog import leapfrog1_step, leapfrog_step

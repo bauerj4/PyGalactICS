@@ -57,6 +57,8 @@ and asserts disk Σ(R) drift < 55% and halo ρ(r) drift < 75% (coarse grid, 8k p
 | `GALACTICSICS_POISSON_THREADS` | environment | OpenMP threads for the C polar integrator. **Unset = all CPUs** when the extension is built; `0` forces the Python path |
 | `GALACTICSICS_POISSON_GPU` | environment | `1` = CuPy batched polar fill (takes precedence over OpenMP when a CUDA device is present) |
 | `GALACTICSICS_DISKDF_WORKERS` | environment | Thread-pool size for radial ``vφ`` quadratures in Python `diskdf` (`1` = serial) |
+| `SampleConfig.use_openmp` | sampling API | `True` (default): disk/halo/bulge rejection via `_sampler_c` OpenMP; see [`ic_sampling.md`](ic_sampling.md) |
+| `SampleConfig.n_openmp_threads` | sampling API | `0` = all cores; `>0` pins `omp_set_num_threads` |
 | Coarse grid auto-scaling | `solve.py` | Reduces polar nodes, DF table size, and iteration cap when `grid.nr` is small |
 | `scripts/benchmark_solve.py` | CLI | Times solve + optional `freqdbh` retabulation |
 
