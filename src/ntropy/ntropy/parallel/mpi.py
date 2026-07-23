@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -23,12 +24,39 @@ from ntropy.parallel.local_essential_tree import (
 
 _MPI_COMM = None
 _MPI_AVAILABLE = False
+_MPI = None
+
+
+def _launched_under_mpi() -> bool:
+    """True when this process was started by ``mpirun`` / ``mpiexec`` / PMI."""
+    return any(
+        key in os.environ
+        for key in (
+            "OMPI_COMM_WORLD_SIZE",
+            "OMPI_COMM_WORLD_RANK",
+            "PMI_SIZE",
+            "PMI_RANK",
+            "PMIX_RANK",
+            "MPI_LOCALNRANKS",
+            "I_MPI_INFO_NUMA_NODE_NUM",
+        )
+    )
+
 
 try:
+    import mpi4py
+
+    # OpenMPI 5 / mpi4py auto-Init outside mpirun can hang forever (PMIx /
+    # interface probing). Notebooks and serial runs must import without Init;
+    # mpirun workers keep the default auto-init path.
+    if not _launched_under_mpi():
+        mpi4py.rc.initialize = False
+        mpi4py.rc.finalize = False
     from mpi4py import MPI as _MPI
 
-    _MPI_COMM = _MPI.COMM_WORLD
     _MPI_AVAILABLE = True
+    if _MPI.Is_initialized():
+        _MPI_COMM = _MPI.COMM_WORLD
 except (ImportError, RuntimeError, OSError):
     _MPI = None
     _MPI_COMM = None
@@ -36,13 +64,22 @@ except (ImportError, RuntimeError, OSError):
 
 
 def mpi_available() -> bool:
-    """Return True when mpi4py is installed."""
+    """Return True when mpi4py is installed (Init not required)."""
     return _MPI_AVAILABLE
 
 
 def get_comm():
-    """Return the world MPI communicator, or None if mpi4py is missing."""
-    return _MPI_COMM
+    """
+    Return the world MPI communicator, or None if mpi4py is missing / not Init.
+
+    Serial notebooks never call ``MPI.Init()`` (it can hang outside ``mpirun``).
+    Workers launched under ``mpirun`` auto-init on import and get ``COMM_WORLD``.
+    """
+    if not _MPI_AVAILABLE or _MPI is None:
+        return None
+    if not _MPI.Is_initialized():
+        return None
+    return _MPI.COMM_WORLD
 
 
 def mpi_rank0(comm=None) -> bool:
@@ -50,10 +87,10 @@ def mpi_rank0(comm=None) -> bool:
     if comm is None:
         if not _MPI_AVAILABLE:
             return True
-        comm = _MPI_COMM
+        comm = get_comm()
     if comm is None:
         return True
-    return comm.Get_rank() == 0
+    return int(comm.Get_rank()) == 0
 
 
 @dataclass

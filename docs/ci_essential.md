@@ -47,8 +47,10 @@ markers = [
 ```
 
 Add `@pytest.mark.essential` (or module-level `pytestmark`) when a regression would
-break the DBH → sample → evolve path documented in
-[`notebooks/gpu_bh_dbh.ipynb`](../notebooks/gpu_bh_dbh.ipynb).
+break the DBH → sample → evolve path documented in the usage notebooks
+([`gpu_bh_dbh`](../notebooks/gpu_bh_dbh.ipynb),
+[`nfw_halo_walkthrough`](../notebooks/nfw_halo_walkthrough.ipynb),
+[`campaign_density_walkthrough`](../notebooks/campaign_density_walkthrough.ipynb)).
 
 ## Related docs
 

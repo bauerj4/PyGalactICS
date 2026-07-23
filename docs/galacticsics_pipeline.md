@@ -425,8 +425,11 @@ against fresh harmonics.
 
 | Notebook | Pipeline demonstrated |
 |----------|----------------------|
-| [`nfw_halo_walkthrough.ipynb`](../notebooks/nfw_halo_walkthrough.ipynb) | `GalaxyModel` → solve → sample → **ntropy** stability (NFW halo) |
-| [`campaign_density_walkthrough.ipynb`](../notebooks/campaign_density_walkthrough.ipynb) | Full campaign runner: solve → sample → evolve with diagnostics |
+| [`gpu_bh_dbh.ipynb`](../notebooks/gpu_bh_dbh.ipynb) | Full DBH ICs → OpenMP sample → **GPU BH** + potential virial |
+| [`nfw_halo_walkthrough.ipynb`](../notebooks/nfw_halo_walkthrough.ipynb) | Halo-only: solve → OpenMP `genhalo` → BH accuracy / scaling / stability |
+| [`campaign_density_walkthrough.ipynb`](../notebooks/campaign_density_walkthrough.ipynb) | MW campaign: solve → sample → evolve with density / disk diagnostics |
+
+See also [`notebooks/README.md`](../notebooks/README.md) · [`ic_sampling.md`](ic_sampling.md) · [`ci_essential.md`](ci_essential.md).
 
 Artifacts land in `notebooks/artifacts/` (gitignored).
 

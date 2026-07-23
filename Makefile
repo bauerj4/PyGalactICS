@@ -5,6 +5,7 @@
 #   make legacy-build  Compile legacy Fortran/C binaries
 #   make test           Run full pytest suite
 #   make test-essential PR gate (docs/ci_essential.md)
+#   make loc            Lines of code (cloc; code / comment / blank)
 #   make example-mw    Milky Way potential demo
 #   make clean         Remove build artifacts
 
@@ -13,8 +14,12 @@ VENV   ?= .venv
 PIP    = $(VENV)/bin/pip
 PYTEST = $(VENV)/bin/pytest
 PY     = $(VENV)/bin/python
+CLOC   ?= cloc
 
-.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test test-essential example-mw example-sample example-halo-first clean help
+# Extra cloc flags (e.g. LOC_ARGS='--csv' make loc)
+LOC_ARGS ?=
+
+.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test test-essential loc cloc example-mw example-sample example-halo-first clean help
 
 all: install-dev legacy-build
 
@@ -27,6 +32,7 @@ help:
 	@echo "  legacy-samplers Build gendisk, genhalo, genbulge, diskdf, getfreqs"
 	@echo "  test           Run full pytest (excludes legacy_binary)"
 	@echo "  test-essential Fast PR gate (-m essential; see docs/ci_essential.md)"
+	@echo "  loc            Count LOC with cloc (code/comment/blank; skips .venv & gitignored)"
 	@echo "  example-mw     Run examples/mw_default.py"
 	@echo "  example-solve  Run examples/solve_potential.py"
 	@echo "  example-sample Run examples/sample_galaxy.py"
@@ -42,15 +48,20 @@ $(VENV)/bin/python:
 
 install-python-deps: $(VENV)/bin/python install-system-mpi
 	$(PIP) install -e ".[dev]"
-	$(PIP) install -e "src/ntropy[dev]"
-	@if ldconfig -p 2>/dev/null | grep -q 'libmpi\.so'; then \
-		$(PIP) install --force-reinstall --no-cache-dir mpi4py \
-			|| echo "WARNING: mpi4py reinstall failed. Install OpenMPI dev headers (make install-system-mpi or sudo apt install openmpi-bin libopenmpi-dev) then: pip install --force-reinstall mpi4py"; \
+	$(PIP) install -e "src/ntropy[dev,mpi]"
+	@if command -v mpirun >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libmpi\.so'; then \
+		$(PIP) install --force-reinstall --no-cache-dir "mpi4py>=3.1" \
+			|| { echo "ERROR: mpi4py rebuild failed. Install OpenMPI headers then retry:"; \
+			     echo "  sudo apt-get install -y openmpi-bin libopenmpi-dev"; \
+			     echo "  $(PIP) install --force-reinstall --no-cache-dir mpi4py"; exit 1; }; \
 	else \
-		echo "NOTE: OpenMPI not detected; skipping mpi4py rebuild (MPI tests need make install-system-mpi)"; \
+		echo "ERROR: OpenMPI (mpirun + libmpi) not found — MPI notebook cells will be skipped."; \
+		echo "  sudo apt-get update && sudo apt-get install -y openmpi-bin libopenmpi-dev"; \
+		echo "  $(PIP) install --force-reinstall --no-cache-dir mpi4py"; \
+		exit 1; \
 	fi
-	@$(PY) -c "from mpi4py import MPI; print('mpi4py OK (COMM_WORLD size =', MPI.COMM_WORLD.Get_size(), ')')" \
-		|| echo "WARNING: mpi4py import failed. Install OpenMPI (make install-system-mpi or sudo apt install openmpi-bin libopenmpi-dev) then: pip install --force-reinstall mpi4py"
+	@$(PY) -c "from mpi4py import MPI; print('mpi4py OK (COMM_WORLD size =', MPI.COMM_WORLD.Get_size(), ')')"
+	@echo "mpirun: $$(mpirun --version 2>/dev/null | head -1)"
 
 install-dev: install-python-deps generate-artifacts
 
@@ -75,6 +86,26 @@ test: install-dev
 
 test-essential:
 	$(PYTEST) tests/ src/ntropy/tests/ -v --tb=short -m "essential and not legacy_binary and not slow"
+
+# Lines of code via cloc. Uses `git ls-files` so .venv, site-packages, build/,
+# artifacts, and other gitignored install noise are excluded automatically.
+loc cloc:
+	@command -v $(CLOC) >/dev/null 2>&1 || { \
+		echo "cloc not found. Install: sudo apt install cloc  (or brew install cloc)"; \
+		exit 1; \
+	}
+	@echo "=== Summary (tracked sources; blank / comment / code) ==="
+	@$(CLOC) --vcs=git $(LOC_ARGS) .
+	@echo ""
+	@echo "=== By area ==="
+	@for d in src/galacticsics src/ntropy/ntropy tests src/ntropy/tests \
+		docs examples scripts notebooks campaigns models; do \
+		if [ -d "$$d" ]; then \
+			echo ""; \
+			echo "--- $$d ---"; \
+			$(CLOC) --vcs=git --quiet $(LOC_ARGS) "$$d"; \
+		fi; \
+	done
 
 example-mw: install-dev
 	$(PY) examples/mw_default.py

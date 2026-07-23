@@ -212,6 +212,12 @@ class Simulation:
             last_acc = self._accel_at_pos(pos, target_indices=active_idx)
             return last_acc
 
+        # Prefer output.energy_every for the energy time series (snapshot
+        # stride ``every`` is orthogonal and often 0 in notebook runs).
+        energy_stride = max(0, int(getattr(out, "energy_every", 0) or 0))
+        if energy_stride <= 0 and out.every > 0:
+            energy_stride = int(out.every)
+
         state, energies, diag_log = run_tiered_leapfrog(
             state,
             registry,
@@ -219,7 +225,7 @@ class Simulation:
             ts_config=ts_config,
             end_time_gyr=end_gyr,
             order=integ.order,
-            energy_every=max(0, out.every),
+            energy_every=energy_stride,
             diagnostics_every=out.diagnostics_every,
             diagnostics_jsonl=diagnostics_jsonl if io_rank0 else None,
             on_record=_maybe_dump if out.write_particle_bins else None,

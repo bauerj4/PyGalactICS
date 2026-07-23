@@ -76,7 +76,11 @@ diag = virial_diagnostic_potential(pos, vel, mass, work_dir / "dbh.dat", rtol=0.
 assert diag["is_virial_equilibrium"]
 ```
 
-Notebook usage: [`notebooks/gpu_bh_dbh.ipynb`](../notebooks/gpu_bh_dbh.ipynb) § IC validation.
+Notebook usage:
+
+- [`notebooks/gpu_bh_dbh.ipynb`](../notebooks/gpu_bh_dbh.ipynb) — full DBH + GPU BH (§ IC validation)
+- [`notebooks/nfw_halo_walkthrough.ipynb`](../notebooks/nfw_halo_walkthrough.ipynb) — halo-only potential virial (§2b)
+- [`notebooks/campaign_density_walkthrough.ipynb`](../notebooks/campaign_density_walkthrough.ipynb) — MW campaign diagnostics
 
 ## Related tests
 

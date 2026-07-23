@@ -134,8 +134,14 @@ result = Simulation(cfg, state=ic.state).run(show_progress=True)
 
 ## Notebooks
 
-Tutorial walkthroughs live in [`notebooks/`](notebooks/). Generated figures and
-particle files go to `notebooks/artifacts/` (gitignored).
+Usage guides live in [`notebooks/`](notebooks/) (see [`notebooks/README.md`](notebooks/README.md)).
+Generated figures and particle files go to `notebooks/artifacts/` (gitignored).
+
+| Notebook | Focus |
+|----------|--------|
+| [`gpu_bh_dbh.ipynb`](notebooks/gpu_bh_dbh.ipynb) | Full DBH ICs → OpenMP sample → **GPU BH** evolution; potential virial |
+| [`nfw_halo_walkthrough.ipynb`](notebooks/nfw_halo_walkthrough.ipynb) | Halo-only IC → BH accuracy / scaling / stability |
+| [`campaign_density_walkthrough.ipynb`](notebooks/campaign_density_walkthrough.ipynb) | MW campaign sweeps + density / disk diagnostics |
 
 ### [`nfw_halo_walkthrough.ipynb`](notebooks/nfw_halo_walkthrough.ipynb)
 
