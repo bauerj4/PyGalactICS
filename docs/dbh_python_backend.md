@@ -46,7 +46,7 @@ Quick parity tests (psi0, frequency sanity, appdisk subtraction) run in the defa
 
 `test_python_solved_density_stable_100_myr` evolves Python-solved disk+halo ICs for
 ≈100 Myr with `bh_c` gravity (theta=0.5, optimized preset), tiered leapfrog integration,
-and asserts disk Σ(R) drift < 55% and halo ρ(r) drift < 75% (coarse grid, 8k particles).
+and asserts disk Σ(R) drift < 75% and halo ρ(r) drift < 75% (coarse grid, 8k particles).
 
 ## Performance knobs
 

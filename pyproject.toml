@@ -45,4 +45,5 @@ markers = [
     "legacy_binary: requires compiled legacy/bin executables",
     "physics_python: Python physics backend (no legacy subprocesses)",
     "slow: long-running performance or integration tests",
+    "benchmark: optional performance timing (not part of default CI gates)",
 ]
