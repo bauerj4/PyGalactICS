@@ -86,3 +86,20 @@ docs/_build/
 
 # --- Paper drafts / figures (local; ship via `make papers-zip`) ---
 papers/
+
+# --- Local tooling binaries (downloaded pandoc/tectonic/etc.; not source) ---
+.tools/
+
+# --- Pandoc / Markdown conversion junk ---
+# papers/ is already ignored wholesale; keep explicit patterns so force-adds
+# and any future mirrors outside papers/ stay untracked.
+*.pandoc.md
+*.pandoc.html
+*.pandoc.tex
+*_paper_build*
+*_paper_build.*
+**/paper.html
+**/paper.docx
+papers/**/paper.pdf
+papers/**/*.html
+papers/**/*.docx
