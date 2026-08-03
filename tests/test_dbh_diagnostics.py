@@ -68,6 +68,30 @@ def test_explain_ic_instability_reports_failed_checks() -> None:
 
 
 @pytest.mark.physics_python
+def test_ic_looks_stable_accepts_single_hot_outlier_at_large_n() -> None:
+    """One particle above 6.0 must not fail a healthy 1e6-scale disk (p99.99 gate)."""
+    from ntropy.particles import ParticleState
+
+    n = 20_000
+    pos = np.zeros((n, 3))
+    pos[:, 0] = 5.0
+    vel = np.zeros((n, 3))
+    vel[:, 1] = 1.48  # circular-ish bulk
+    vel[-1] = [6.03, 0.0, 0.0]  # single extreme outlier like the corpus failure
+    state = ParticleState(
+        pos=pos,
+        vel=vel,
+        mass=np.ones(n),
+        eps=np.full(n, 0.1),
+        tags=np.full(n, "disk"),
+    )
+    diag = diagnose_ic_stability(state)
+    assert diag["disk_v_max"] == pytest.approx(6.03, rel=0.01)
+    assert diag["disk_v_p9999"] < 6.0
+    assert ic_looks_stable(state)
+
+
+@pytest.mark.physics_python
 def test_ic_looks_stable_accepts_marginal_coarse_grid_tail() -> None:
     """N≈20k coarse-grid MW runs can have v_max≈5.1 with healthy median ~1.1."""
     from ntropy.particles import ParticleState

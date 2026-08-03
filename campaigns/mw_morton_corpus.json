@@ -1,0 +1,74 @@
+{
+  "name": "mw_morton_corpus",
+  "artifacts": {
+    "root": "runs/mw_morton_corpus_v2"
+  },
+  "run": {
+    "skip_done": true,
+    "verbose": true,
+    "stages": ["solve", "sample", "evolve"],
+    "reevolve_checkpoints": false,
+    "gpu_batch_size": 4
+  },
+  "particles": {
+    "disk": 1000000,
+    "halo": 500000,
+    "bulge": 250000
+  },
+  "softening": {
+    "disk": 0.05,
+    "halo": 0.25,
+    "bulge": 0.05
+  },
+  "parallel": {
+    "mpi_ranks": 1,
+    "core_fraction": 0.75
+  },
+  "sample": {
+    "use_openmp": true,
+    "n_openmp_threads": 0,
+    "run_diskdf": true
+  },
+  "base_model": {
+    "grid": {
+      "name": "mw_morton_base",
+      "base": "milky_way_disk_halo_bulge",
+      "axes": {},
+      "omit_components": [[]],
+      "coarse_grid": true,
+      "physics_backend": "python"
+    },
+    "patch": {}
+  },
+  "sweep": {
+    "enabled": true,
+    "grid_specs": [
+      "campaigns/mw_morton_grid.json",
+      "campaigns/mw_morton_grid_stable.json"
+    ]
+  },
+  "evolve": {
+    "end_time_gyr": 2.0,
+    "dt_base": 0.05,
+    "timestep_eta": 0.025,
+    "max_timestep_bin": 5,
+    "timestep_update_every": 2,
+    "integrator_order": 2,
+    "diagnostics_every": 20,
+    "particle_dump_every": 100,
+    "dump_float32": true
+  },
+  "force": {
+    "method": "gpu_bh",
+    "theta": 0.5,
+    "rebuild_every": 10,
+    "active_subset": true,
+    "bh_optimizations_preset": "optimized",
+    "bh_optimizations": {
+      "preset": "optimized",
+      "simd_leaves": true,
+      "omp_schedule": "guided"
+    }
+  },
+  "checkpoints_gyr": [0.0, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0]
+}

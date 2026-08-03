@@ -40,6 +40,52 @@ def test_tiered_leapfrog_short_run():
     assert state.timestep_bin.shape == (state.n,)
 
 
+def test_tiered_leapfrog_resume_from_start_step():
+    """Continuing from a mid-run dump step matches a continuous integration."""
+    registry = TypeRegistry.from_specs(
+        [
+            ParticleTypeSpec(
+                id=1, label="all", eps=0.05, min_timestep_bin=0, max_timestep_bin=4
+            )
+        ]
+    )
+
+    def _run(state, *, end_gyr: float, start_step: int = 0):
+        dumps: dict[int, object] = {}
+
+        def accel(pos: np.ndarray, active_idx: np.ndarray | None = None) -> np.ndarray:
+            from ntropy.forces.brute import compute_forces_brute
+
+            return compute_forces_brute(pos, state.mass, state.eps)
+
+        def on_record(step, snap, acc):
+            dumps[step] = snap.copy()
+
+        ts_config = TimestepConfig(eta=0.05, dt_base=0.05, max_bin=4)
+        out, _, _ = run_tiered_leapfrog(
+            state,
+            registry,
+            accel,
+            ts_config=ts_config,
+            end_time_gyr=end_gyr,
+            order=2,
+            diagnostics_every=1,
+            particle_dump_every=2,
+            on_record=on_record,
+            start_step=start_step,
+        )
+        return out, dumps
+
+    full = sample_plummer(seed=7)
+    full.type_id = np.ones(full.n, dtype=np.int32)
+    continuous, dumps = _run(full.copy(), end_gyr=0.002)
+    assert 2 in dumps
+    mid = dumps[2].copy()
+    resumed, _ = _run(mid, end_gyr=0.002, start_step=2)
+    np.testing.assert_allclose(resumed.pos, continuous.pos, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(resumed.vel, continuous.vel, rtol=1e-9, atol=1e-9)
+
+
 def test_tiered_bins_differ_for_different_accel():
     """Disks in stronger fields should trend toward finer bins than outer halo."""
     registry = TypeRegistry.default_galaxy()

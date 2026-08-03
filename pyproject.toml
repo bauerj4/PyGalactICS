@@ -32,6 +32,7 @@ all = ["galacticsics[galpy,agama,gala,ml,dev]"]
 [project.scripts]
 galacticsics-generate-artifacts = "galacticsics.artifacts.cli:main"
 galacticsics-campaign = "galacticsics.campaign.cli:main"
+galacticsics-morton-index = "galacticsics.ml.morton.export_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

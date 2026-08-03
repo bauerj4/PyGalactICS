@@ -122,6 +122,30 @@ the primary equilibrium checks.
 | `forces/context.py` | `ForceContext` dispatch for `"gpu_bh"` |
 | `scripts/bench_gpu_bh.py` | Scaling benchmark harness |
 
+## VRAM climb / reset-to-0 (leapfrog gates)
+
+**What you see:** nvidia-smi VRAM climbs toward tens of GB during a
+`gpu_bh` evolve, then drops to ~0 (or ComfyUI’s few hundred MiB) when the
+Python process exits.
+
+**Root cause (fixed in `compute_forces_gpu_bh`):** each leapfrog step rebuilds
+the octree and allocates new CuPy buffers. Tree node count fluctuates, so
+CuPy’s memory pool retained a bin for each prior size instead of returning
+blocks to the driver. That is a **within-process pool leak** (not ComfyUI
+fighting the job). Suite scripts also spawn a fresh
+`evolve_component_slices.py` per gate — when that process dies, the CUDA
+context is destroyed and VRAM resets (expected lifecycle).
+
+**Monitoring:** correlate `nvidia-smi --query-compute-apps=pid,...` with the
+evolve PID. Climb while one PID lives ⇒ pool/leak; drop when that PID exits
+⇒ process lifecycle. ComfyUI (~300 MiB) is harmless background.
+
+**Fix:** after each walk, drop device refs and call
+`cupy.get_default_memory_pool().free_all_blocks()` (see `GpuBhState.detach`
+and `_cupy_free_pooled_blocks`). Prefer `ForceContext(method="gpu_bh")` for
+long runs; evolve scripts that call `compute_forces_gpu_bh` directly now get
+the same free path.
+
 ## Known limitations
 
 1. Tree build remains on the CPU (`BarnesHutTreeC`).

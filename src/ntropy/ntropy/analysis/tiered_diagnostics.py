@@ -211,6 +211,7 @@ def write_particle_bin_dump(
     state: ParticleState,
     *,
     acc: np.ndarray | None = None,
+    float32: bool = False,
 ) -> None:
     """
     Write per-particle bin and kinematic diagnostics to ``.npz``.
@@ -223,21 +224,28 @@ def write_particle_bin_dump(
         Current snapshot (must include ``timestep_bin``).
     acc : ndarray, optional
         Acceleration array for ``accel_mag`` column.
+    float32 : bool, optional
+        When True, cast ``pos``/``vel``/``mass``/``eps`` to float32 to shrink
+        corpus dumps (~2×). Integer columns stay int32.
     """
     if state.timestep_bin is None:
         raise ValueError("particle bin dump requires state.timestep_bin")
+    ftype = np.float32 if float32 else None
+
+    def _cast(arr: np.ndarray) -> np.ndarray:
+        return arr.astype(np.float32, copy=False) if ftype is not None else arr
+
     payload: dict[str, np.ndarray] = {
         "timestep_bin": state.timestep_bin.astype(np.int32),
         "type_id": state.type_id.astype(np.int32) if state.type_id is not None else np.zeros(state.n, dtype=np.int32),
-        "mass": state.mass,
-        "eps": state.eps,
-        "pos": state.pos,
-        "vel": state.vel,
+        "mass": _cast(state.mass),
+        "eps": _cast(state.eps),
+        "pos": _cast(state.pos),
+        "vel": _cast(state.vel),
     }
-    if state.tags is not None:
-        payload["tags"] = np.asarray(state.tags).astype("U16")
+    # Prefer type_id over string tags for corpus size (skip tags by default).
     if acc is not None:
-        payload["accel_mag"] = np.linalg.norm(acc, axis=1)
+        payload["accel_mag"] = _cast(np.linalg.norm(acc, axis=1))
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **payload)
 

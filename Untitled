@@ -1,0 +1,244 @@
+Under A₂(R = R_d) (R_d = 2 kpc), the α story is unchanged: α=1 still fades (0.110→0.031) vs data (0.206→0.124); α=2.5 tracks best (0.168→0.113).
+
+A₂(R_d)(t): papers/mnras_noneq_ics/figures/fig_906c4_a2_Rd_t.png
+Face-on evolve: fig_a2Rd_906c4_faceon_{data,fftlongAB_a10,a15,a25,deposit}.png
+Summary: papers/mnras_noneq_ics/results/a2_at_Rd_906c4_SUMMARY.md
+
+Future gates can use --a2-r-eval R_d. Nothing else to package unless you want this metric switched in the paper.
+
+1h ago
+￼
+￼
+￼
+￼
+A2 at Rd + face-on evolve what can we do to improve from here?
+
+￼
+Worked
+for 4s
+Highest leverage from here:
+
+Train for A₂(R_d), not median A₂
+Gates and losses still optimize median/soft Am. Put quiet-gated Am or FFT residual weight on the ring at 
+𝑅
+≈
+𝑅
+𝑑
+R≈R 
+d
+​
+  (and maybe 
+0.5
+0.5–
+1.5
+ 
+𝑅
+𝑑
+1.5R 
+d
+​
+ ). That targets the metric you care about and may cut the amplify need.
+
+Learned residual amplify (replace fixed α)
+α=2.5 works; α=1 doesn’t; morph FT made it worse. Predict a small m=2 residual scale (or skip-feature residual) from 
+𝑧
+,
+𝜃
+,
+𝐴
+2
+z,θ,A 
+2
+​
+  so “amplify” is part of the model, not a hand knob.
+
+Match face-on evolve, not just A₂(t)
+Use short evolve-gated loss on face-on Σ (or A₂(R_d)) at ~0.25–0.5 Gyr vs data — biases toward DFs that keep the bar pattern, not just loud t=0 maps.
+
+OT-lite into the barred generative path
+F fixed OOD ⟨v_φ⟩. Try the same transport on 906c4-class ICs (start from library/GalactICS DF, push dens+moments) — may get α≈1 persistence without softer AE dens.
+
+Paper freeze option
+Publish α=2.5 m2 + A+B as the recipe, with A₂(R_d) + face-on as the main figures, and α=1 / map softness as limitations. Ship Part 1 while (1)–(4) run as follow-ups.
+
+I’d do 1 + 3 next if you want another technical push; 5 if you want a manuscript checkpoint.
+
+1h ago
+￼
+￼
+￼
+￼
+yes, let's do this.
+
+￼
+Worked
+for 16s
+￼
+Thought
+for 3s
+for 3s
+Executing the technical push: train for A₂(R_d) and add short evolve-gated face-on / A₂(R_d) matching.
+
+A2(Rd) loss + evolve-gate
+Auto
+
+Shipped A2(Rd) gate report
+Shipped A2(Rd) gate report
+￼
+Thought
+briefly
+briefly
+Running 1 + 3 now: A₂(R_d)-targeted training and short evolve-gated face-on / A₂(R_d) matching, with α ladder gates on 906c4.
+
+Finished
+A2(Rd) loss + evolve-gate
+￼
+Worked
+for 1s
+￼
+Thought
+for 1s
+for 1s
+1+3 is done and already written up — no further packaging needed.
+
+Takeaway: α=1 holds particle A₂(R_d) through 0.5 Gyr, then fades by 2 Gyr; map A₂(R_d) didn’t beat fftlong. Best long-run recipe remains fftlong A+B + m2 α=2.5. Learned amplify / OT-lite on barred ICs (2/4) still deferred if you want the next push.
+
+24m ago
+￼
+￼
+￼
+￼
+9 Files Changed
+￼Review
+￼
+autoencoder.py
++270
+−3
+￼
+smoke_field_maps.py
++128
+−4
+￼
+test_field_maps.py
++46
+−1
+￼
+summarize_a2rd_gates.py
++271
+￼
+Show 5 more
+A2(Rd) evolve-gate train
+￼
+￼
+USER: "yes, let's do this." — execute the recommended technical push from the prior message:
+
+**Primary (must): 1 + 3**
+1. **Train for A₂(R = R_d)** — not median A₂. Put quiet-gated Am / FFT / dens-residual weight on the ring near R≈R_d (and optionally 0.5–1.5 R_d). Use θ disk.scale_length per system.
+3. **Short evolve-gated match** — soft loss or eval loop on face-on Σ and/or A₂(R_d) at ~0.25–0.5 Gyr vs data, so ICs keep the bar pattern (not just loud t=0).
+
+**Secondary if time/VRAM allows: 2 and/or 4**
+2. Learned residual amplify (predict m2 scale from z/θ) instead of fixed α
+4. OT-lite on 906c4-class barred generative path (not just OOD quiet)
+
+**Not required now:** full paper freeze (item 5) — but update paper/results briefly if 1+3 land real gains.
+
+## Context
+Workspace: `/home/jbauer/PyGalactICS`
+- Best teacher: `runs/ml/field_maps/df_match_BA_2026-07-27/joint_df_fftlong_ft/multitower_slice_ae.pt`
+- Best gate: fftlong A+B + m2 α=2.5 → median A₂ 0.572→0.437 ≈ data-flat; α=1 fails
+- A₂(R_d) already implemented for eval: `disk_azimuthal_fourier(..., r_eval=R_d)`, `--a2-r-eval R_d` on evolve scripts
+- Map A₂(R_d) 906c4: data 0.206→0.124; α=2.5 0.168→0.113; α=1 0.110→0.031
+- Morph-heavy FTs previously **regressed** 906c4 — don't repeat blind morph FT; target R_d specifically
+- GPU 48GB, gpu_bh; watch pids.max if fork fails
+- Journal: new dir e.g. `runs/ml/field_maps/a2Rd_evolve_gate_2026-07-27/JOURNAL.md`
+
+## Deliverables
+1. Code: loss/eval for A₂(R_d) in training path; short evolve-gate or proxy
+2. Finetune from fftlong A+B teacher
+3. Gate 906c4 (±54a8) with A₂(R_d)(t) AND face-on panels; try α=1, 1.5, 2.5
+4. Report whether α=1 improves under A₂(R_d); ship figures to `papers/mnras_noneq_ics/figures/`
+5. Update JOURNAL + brief paper/results note
+
+Return: W/L, A₂(R_d) pre→post table vs data, figure paths, best recipe.
+
+All gates finished. Extracting A₂(R_d) results and shipping figures.
+
+￼
+Edited
+summarize_a2rd_gates.py, explored 2 files, 1 search, ran 14 commands +219 -133
+summarize_a2rd_gates.py, explored 2 files, 1 search, ran 14 commands
++
+2
+1
+9
+219
+-
+1
+3
+3
+133
+Updating the journal and paper with an honest W/L — short-gate hold was already true for fftlong under median A₂.
+
+￼
+Edited
+3 files, explored 2 files +58 -45
+3 files, explored 2 files
++
+5
+8
+58
+-
+4
+5
+45
+Chat context summarized
+￼
+Edited
+JOURNAL.md, ran 1 command +15 -78
+JOURNAL.md, ran 1 command
++
+1
+5
+15
+-
+7
+8
+78
+Verdict: partial W / mostly L on α→1
+1+3 shipped. α=1 does not become data-flat under A₂(R_d). Short-gate hold is real but not novel (fftlong median already held through 0.5 Gyr). Map A₂(R_d) unchanged vs teacher.
+
+Particle A₂(R = 2 kpc) — 906c4
+α	0.5 Gyr	2 Gyr	@0.5 in 2 Gyr
+1.0
+0.485→0.482
+0.485→0.146
+0.484
+1.5
+0.621→0.607
+0.621→0.249
+0.613
+2.5
+0.711→0.699
+0.711→0.351
+0.707
+Data particle dump ≈ 0.46–0.49 (subsampling variance).
+
+Map A₂(R_d) vs prior fftlong — no gain
+α	a2rd_ft pre→@0.5→post	fftlong prior	data
+1.0
+0.109→0.079→0.035
+0.110→0.080→0.031
+0.206→0.189→0.124
+2.5
+0.171→0.125→0.095
+0.168→0.128→0.113
+—
+Best recipe
+2 Gyr (median A₂): still fftlong A+B + m2 α=2.5 (0.572→0.437)
+≤0.5 Gyr under A₂(R_d): a2rd_ft + α=1 holds, but does not retire amplify for long runs
+Secondary 2/4 deferred
+Artefacts
+Ckpt: runs/ml/field_maps/a2Rd_evolve_gate_2026-07-27/a2rd_ft/multitower_slice_ae.pt
+Journal: runs/ml/field_maps/a2Rd_evolve_gate_2026-07-27/JOURNAL.md
+Summary: papers/mnras_noneq_ics/results/a2Rd_evolve_gate_SUMMARY.md
+Paper §4.4e + README updated

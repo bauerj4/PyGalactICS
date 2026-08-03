@@ -204,3 +204,85 @@ def test_density_map_shared_limits_across_maps():
     im1 = plot_density_map(axes[1], map_hi, title="hi", vmin=vmin, vmax=vmax)
     add_density_colorbar(fig, im1, axes, label="log10")
     plt.close(fig)
+
+
+def test_write_component_projection_pngs(tmp_path):
+    from galacticsics.campaign.analysis import (
+        present_components,
+        write_campaign_projection_pngs,
+        write_component_projection_pngs,
+    )
+
+    rng = np.random.default_rng(1)
+    n_disk, n_bulge, n_halo = 40, 20, 30
+    pos = rng.normal(size=(n_disk + n_bulge + n_halo, 3))
+    mass = np.full(pos.shape[0], 0.01)
+    eps = np.full(pos.shape[0], 0.1)
+    tags = np.array(["disk"] * n_disk + ["bulge"] * n_bulge + ["halo"] * n_halo)
+    state = ParticleState.from_arrays(pos, np.zeros_like(pos), mass, eps, tags=tags)
+    assert present_components(state) == ["disk", "bulge", "halo"]
+
+    out = tmp_path / "proj"
+    paths = write_component_projection_pngs(state, out, dpi=72)
+    names = sorted(p.name for p in paths)
+    assert names == [
+        "bulge_face_on.png",
+        "bulge_side_on.png",
+        "disk_face_on.png",
+        "disk_side_on.png",
+        "halo_face_on.png",
+        "halo_side_on.png",
+    ]
+    assert all(p.is_file() and p.stat().st_size > 0 for p in paths)
+
+    model = tmp_path / "model_a"
+    model.mkdir()
+    np.savez_compressed(
+        model / "ic_state.npz",
+        pos=state.pos,
+        vel=state.vel,
+        mass=state.mass,
+        eps=state.eps,
+        tags=state.tags,
+    )
+    campaign_paths = write_campaign_projection_pngs(
+        tmp_path, snapshots=["ic"], components=["disk"]
+    )
+    assert len(campaign_paths) == 2
+    assert (model / "projections" / "ic" / "disk_face_on.png").is_file()
+
+    particles = model / "evolution" / "particles"
+    particles.mkdir(parents=True)
+    # Minimal dump (halo-only tags already on state)
+    np.savez_compressed(
+        particles / "step_000100.npz",
+        pos=state.pos.astype(np.float32),
+        vel=state.vel.astype(np.float32),
+        mass=state.mass.astype(np.float32),
+        eps=state.eps.astype(np.float32),
+        timestep_bin=np.zeros(state.n, dtype=np.int32),
+        type_id=np.zeros(state.n, dtype=np.int32),
+    )
+    step_paths = write_campaign_projection_pngs(
+        tmp_path, snapshots=["steps"], components=["halo"], model_dirs=[model]
+    )
+    assert len(step_paths) == 2
+    assert (model / "projections" / "step_000100" / "halo_side_on.png").is_file()
+
+
+def test_halo_side_on_has_no_midplane_cut_by_default():
+    """Halo side-on must not apply a thin |z| slice (that looks disk-like)."""
+    from galacticsics.campaign.analysis import component_projections
+
+    rng = np.random.default_rng(2)
+    n = 200
+    pos = rng.normal(scale=3.0, size=(n, 3))
+    pos[:40, 2] = rng.uniform(5.0, 8.0, size=40)  # high-|z| particles
+    mass = np.full(n, 0.01)
+    tags = np.array(["halo"] * n)
+    state = ParticleState.from_arrays(pos, np.zeros_like(pos), mass, np.full(n, 0.1), tags=tags)
+    _, side_default = component_projections(state, "halo", half_extent=10.0, n_bins=32)
+    _, side_sliced = component_projections(
+        state, "halo", half_extent=10.0, n_bins=32, z_slice=0.3
+    )
+    assert side_default.density.sum() > side_sliced.density.sum()

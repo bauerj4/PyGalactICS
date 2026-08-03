@@ -197,7 +197,9 @@ def bin_plane_density(
     Returns
     -------
     DensityMap2D
-        Binned surface-density map.
+        Binned surface-density map.  ``density[i, j]`` is the bin centred at
+        ``(x_i, y_j)`` (``np.histogram2d`` layout).  For ``matplotlib.imshow``
+        with ``origin='lower'`` and horizontal ``x``, pass ``density.T``.
     """
     ax0, ax1 = axes
     mask = np.ones(len(pos), dtype=bool) if z_filter is None else z_filter
@@ -274,6 +276,32 @@ def compare_surface_density(
     return max_rel
 
 
+def _interp_am_at_r(
+    r_mid: np.ndarray,
+    a_m_over_a0: np.ndarray,
+    r_eval: float,
+) -> tuple[float, float]:
+    """
+    Evaluate ``A_m(R)`` at ``r_eval`` by linear interpolation on finite rings.
+
+    Returns ``(A_m(r_eval), r_used)``.  Falls back to the nearest finite ring
+    centre when fewer than two finite samples exist.
+    """
+    r = np.asarray(r_mid, dtype=float)
+    a = np.asarray(a_m_over_a0, dtype=float)
+    ok = np.isfinite(a) & np.isfinite(r)
+    if not np.any(ok):
+        return float("nan"), float(r_eval)
+    rr = r[ok]
+    aa = a[ok]
+    if rr.size == 1:
+        return float(aa[0]), float(rr[0])
+    order = np.argsort(rr)
+    rr = rr[order]
+    aa = aa[order]
+    return float(np.interp(float(r_eval), rr, aa)), float(r_eval)
+
+
 def disk_azimuthal_fourier(
     pos: np.ndarray,
     mass: np.ndarray,
@@ -283,6 +311,8 @@ def disk_azimuthal_fourier(
     r_max: float | None = None,
     z_max: float | None = 0.3,
     min_count: int = 20,
+    r_eval: float | None = None,
+    recenter: bool = True,
 ) -> dict[str, np.ndarray | float | int]:
     """
     Azimuthal Fourier amplitude ``|a_m| / a_0`` in cylindrical rings.
@@ -306,14 +336,31 @@ def disk_azimuthal_fourier(
     z_max : float or None
         Include only particles with ``|z| < z_max`` [kpc]; ``None`` uses all z.
     min_count : int
-        Minimum particles per ring for inclusion in the global mean.
+        Minimum particles per ring for inclusion in the global median.
+    r_eval : float or None
+        If set, also return ``a_m_over_a0_at_r`` = ``A_m`` linearly
+        interpolated onto this radius (e.g. one disk scale length ``R_d``).
+    recenter : bool
+        If True (default), subtract the mass-weighted COM of the supplied
+        particles before annular Fourier.  Callers typically pass disk-only
+        particles, so this is a disk-COM recenter — required so cylindrical
+        ``(R, φ)`` are measured about the disk centre rather than a
+        halo-dominated / global origin offset.
 
     Returns
     -------
     dict
         ``r_mid``, ``a_m_over_a0`` (per ring), ``counts``,
-        ``a_m_over_a0_median``, ``m``.
+        ``a_m_over_a0_median``, ``m``, ``recenter``, ``com``; when ``r_eval``
+        is set also ``a_m_over_a0_at_r`` and ``r_eval``.
     """
+    pos = np.asarray(pos, dtype=float)
+    mass = np.asarray(mass, dtype=float).reshape(-1)
+    com = np.zeros(3, dtype=float)
+    if recenter and pos.size:
+        w = mass / max(float(mass.sum()), 1e-30)
+        com = (pos * w[:, None]).sum(axis=0)
+        pos = pos - com
     r_cyl = np.sqrt(pos[:, 0] ** 2 + pos[:, 1] ** 2)
     phi = np.arctan2(pos[:, 1], pos[:, 0])
     if r_max is None:
@@ -341,10 +388,76 @@ def disk_azimuthal_fourier(
         a_m_over_a0[i] = float(am)
     valid = (counts >= min_count) & np.isfinite(a_m_over_a0)
     median = float(np.median(a_m_over_a0[valid])) if valid.any() else float("nan")
-    return {
+    out: dict[str, np.ndarray | float | int] = {
         "m": m,
         "r_mid": r_mid,
         "a_m_over_a0": a_m_over_a0,
         "counts": counts,
         "a_m_over_a0_median": median,
+        "recenter": bool(recenter),
+        "com": com,
     }
+    if r_eval is not None:
+        am_r, r_used = _interp_am_at_r(r_mid, a_m_over_a0, float(r_eval))
+        out["r_eval"] = float(r_used)
+        out["a_m_over_a0_at_r"] = float(am_r)
+    return out
+
+
+def plane_density_azimuthal_fourier(
+    dens: np.ndarray,
+    *,
+    half_extent: float,
+    m: int = 2,
+    n_bins: int = 12,
+    r_max: float = 12.0,
+    r_eval: float | None = None,
+) -> dict[str, np.ndarray | float | int]:
+    """
+    Ring Fourier ``|a_m|/a_0`` from a face-on dens map (``histogram2d`` layout).
+
+    ``dens[i, j]`` is the surface density in bin centred at
+    ``(x_i, y_j)`` spanning ``[-half_extent, half_extent]²`` — matching
+    :func:`bin_plane_density`.
+    """
+    dens = np.asarray(dens, dtype=float)
+    if dens.ndim != 2 or dens.shape[0] != dens.shape[1]:
+        raise ValueError(f"expected square dens map, got shape {dens.shape}")
+    n = int(dens.shape[0])
+    half = float(half_extent)
+    # Centres of histogram2d bins (same edges as bin_plane_density).
+    edges_xy = np.linspace(-half, half, n + 1)
+    xc = 0.5 * (edges_xy[:-1] + edges_xy[1:])
+    yc = xc
+    xx, yy = np.meshgrid(xc, yc, indexing="ij")
+    r = np.sqrt(xx * xx + yy * yy)
+    phi = np.arctan2(yy, xx)
+    r_max = float(r_max)
+    if r_max <= 0:
+        r_max = half
+    edges = np.linspace(0.0, r_max, int(n_bins) + 1)
+    r_mid = 0.5 * (edges[:-1] + edges[1:])
+    a_m_over_a0 = np.full(int(n_bins), np.nan, dtype=float)
+    for i in range(int(n_bins)):
+        mask = (r >= edges[i]) & (r < edges[i + 1])
+        wgt = dens[mask]
+        a0 = float(wgt.sum())
+        if a0 <= 0:
+            continue
+        am = np.abs(np.sum(wgt * np.exp(1j * float(m) * phi[mask]))) / a0
+        a_m_over_a0[i] = float(am)
+    valid = np.isfinite(a_m_over_a0)
+    median = float(np.median(a_m_over_a0[valid])) if valid.any() else float("nan")
+    out: dict[str, np.ndarray | float | int] = {
+        "m": int(m),
+        "r_mid": r_mid,
+        "a_m_over_a0": a_m_over_a0,
+        "a_m_over_a0_median": median,
+        "half_extent": half,
+        "r_max": r_max,
+    }
+    if r_eval is not None:
+        am_r, r_used = _interp_am_at_r(r_mid, a_m_over_a0, float(r_eval))
+        out["r_eval"] = float(r_used)
+        out["a_m_over_a0_at_r"] = float(am_r)
+    return out

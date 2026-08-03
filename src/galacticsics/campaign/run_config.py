@@ -329,6 +329,7 @@ class WalkthroughConfig:
     base_patch: dict[str, Any]
     sweep_enabled: bool
     sweep_grid_path: Path | None
+    sweep_grid_paths: list[Path] = field(default_factory=list)
     checkpoints_gyr: list[float] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -360,6 +361,14 @@ class WalkthroughConfig:
 
         sweep = raw.get("sweep", {})
         sweep_path = sweep.get("grid_spec")
+        sweep_paths_raw = sweep.get("grid_specs") or []
+        if isinstance(sweep_paths_raw, str):
+            sweep_paths_raw = [sweep_paths_raw]
+        sweep_paths = [
+            _resolve_path(p, repo=repo) for p in sweep_paths_raw if p
+        ]
+        if sweep_path and not sweep_paths:
+            sweep_paths = [_resolve_path(sweep_path, repo=repo)]
         return cls(
             name=raw.get("name", "walkthrough"),
             paths=WalkthroughPaths(
@@ -377,7 +386,8 @@ class WalkthroughConfig:
             base_grid=base_grid,
             base_patch=dict(base_raw.get("patch", {})),
             sweep_enabled=bool(sweep.get("enabled", False)),
-            sweep_grid_path=_resolve_path(sweep_path, repo=repo) if sweep_path else None,
+            sweep_grid_path=sweep_paths[0] if sweep_paths else None,
+            sweep_grid_paths=sweep_paths,
             checkpoints_gyr=list(raw.get("checkpoints_gyr", [])),
             raw=raw,
         )
@@ -397,11 +407,38 @@ class WalkthroughConfig:
         return expand_grid(self.base_grid)[0]
 
     def sweep_grid(self) -> GridSpec | None:
-        if not self.sweep_enabled or self.sweep_grid_path is None:
-            return None
-        from galacticsics.campaign.spec import load_grid_spec
+        """
+        Load the sweep grid.
 
-        return load_grid_spec(self.sweep_grid_path)
+        When ``sweep.grid_specs`` lists multiple suite files, expand and merge
+        them into one ``grid_mode='list'`` spec (de-duplicated by model hash).
+        """
+        if not self.sweep_enabled:
+            return None
+        paths = list(self.sweep_grid_paths)
+        if not paths and self.sweep_grid_path is not None:
+            paths = [self.sweep_grid_path]
+        if not paths:
+            return None
+        from galacticsics.campaign.spec import (
+            expand_grids,
+            grids_as_list_spec,
+            load_grid_spec,
+        )
+
+        specs = [load_grid_spec(p) for p in paths]
+        if len(specs) == 1:
+            return specs[0]
+        pairs = expand_grids(specs)
+        backend = specs[0].physics_backend
+        coarse = any(s.coarse_grid for s in specs)
+        return grids_as_list_spec(
+            self.name,
+            pairs,
+            base=specs[0].base,
+            coarse_grid=coarse,
+            physics_backend=backend,
+        )
 
     def run_campaign_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for :func:`~galacticsics.campaign.runner.run_campaign`."""
@@ -437,6 +474,9 @@ class WalkthroughConfig:
             "bh_optimizations_extra": bh_extra,
             "eps_by_component": softening_eps_by_component(self.raw),
             "raw_config": self.raw,
+            "force_method": fc.get("method"),
+            "gpu_batch_size": int(self.run.get("gpu_batch_size", 1)),
+            "dump_float32": bool(ev.get("dump_float32", False)),
             "solve_kwargs": {
                 k: v
                 for k, v in {
@@ -533,6 +573,7 @@ CONFIG_FIELD_DOCS: dict[str, str] = {
     "base_model.patch.disk_kinematics.toomre_q_target": "Target Toomre Q at 2.5 R_d (scales sigma_r0).",
     "sweep.enabled": "Run factorial grid from sweep.grid_spec after base case.",
     "sweep.grid_spec": "Path to GridSpec JSON (see campaigns/mw_grid.json).",
+    "sweep.grid_specs": "Optional list of GridSpec JSON paths merged into one corpus.",
     "evolve.end_time_gyr": "N-body duration [Gyr].",
     "evolve.dt_base": "Finest tiered substep [code units]; 1 unit ≈ 9.78 Myr.",
     "evolve.timestep_eta": "η in Δt ∝ √(ε/|a|) for per-particle bin assignment.",

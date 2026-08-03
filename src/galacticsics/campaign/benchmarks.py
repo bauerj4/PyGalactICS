@@ -31,22 +31,28 @@ def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
     """
     Flag IC issues that tend to destabilize tiered N-body runs.
 
-    Returns per-component ``v_max`` and global ``r_max``.  Hot disk outliers
-    (``v_max`` well above the median) often indicate bad sampling or a softening
-    mismatch vs ``ntropy_config.json``.  Disk ``v_phi_mean`` near zero usually
-    means cylindrical velocities were written as Cartesian (gendisk bug).
+    Returns per-component ``v_max``, ``v_p9999`` (99.99th percentile speed), and
+    global ``r_max``.  Hot disk outliers (``v_max`` well above the median) often
+    indicate bad sampling or a softening mismatch vs ``ntropy_config.json``.
+    Disk ``v_phi_mean`` near zero usually means cylindrical velocities were
+    written as Cartesian (gendisk bug).
+
+    At large N a single extreme particle can push ``v_max`` over a hard cut even
+    when the bulk DF is healthy — prefer ``v_p9999`` for gating.
     """
     out: dict[str, float] = {"r_max": float(np.max(np.linalg.norm(state.pos, axis=1)))}
     if state.tags is None:
         speeds = np.linalg.norm(state.vel, axis=1)
         out["v_max"] = float(np.max(speeds))
         out["v_median"] = float(np.median(speeds))
+        out["v_p9999"] = float(np.percentile(speeds, 99.99))
         return out
     for label in np.unique(state.tags):
         mask = state.tags == label
         speeds = np.linalg.norm(state.vel[mask], axis=1)
         out[f"{label}_v_max"] = float(np.max(speeds))
         out[f"{label}_v_median"] = float(np.median(speeds))
+        out[f"{label}_v_p9999"] = float(np.percentile(speeds, 99.99))
         if label == "disk":
             x = state.pos[mask, 0]
             y = state.pos[mask, 1]
@@ -62,6 +68,11 @@ def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
                 out["disk_r_median"] = float(np.median(r[ok]))
                 out["disk_v_phi_positive_frac"] = float(np.mean(v_phi > 0.0))
     return out
+
+
+def _disk_hot_speed(diag: dict[str, float]) -> float:
+    """Speed used for absolute hot-tail gating (percentile when available)."""
+    return float(diag.get("disk_v_p9999", diag.get("disk_v_max", 0.0)))
 
 
 def ic_looks_stable(
@@ -82,9 +93,12 @@ def ic_looks_stable(
     if state.tags is not None:
         disk_med = diag.get("disk_v_median", 0.0)
         disk_max = diag.get("disk_v_max", 0.0)
+        disk_hot = _disk_hot_speed(diag)
         if disk_med < disk_v_median_min:
             return False
-        if disk_max > disk_v_max:
+        # Gate on the 99.99th percentile so one of N=10⁶ particles cannot fail
+        # a healthy disk (absolute max still recorded in diag).
+        if disk_hot > disk_v_max:
             return False
         if disk_med > 0.0 and disk_max / disk_med > disk_v_max_ratio:
             return False
@@ -99,8 +113,10 @@ def ic_looks_stable(
             return False
         if "disk_r_median" in diag and diag["disk_r_median"] < disk_r_median_min:
             return False
-    elif diag.get("v_max", 0.0) > disk_v_max:
-        return False
+    else:
+        hot = float(diag.get("v_p9999", diag.get("v_max", 0.0)))
+        if hot > disk_v_max:
+            return False
     return True
 
 
@@ -137,16 +153,18 @@ def explain_ic_instability(
     if has_components or (state is not None and state.tags is not None):
         disk_med = diag.get("disk_v_median", 0.0)
         disk_max = diag.get("disk_v_max", 0.0)
+        disk_hot = _disk_hot_speed(diag)
         halo_max = diag.get("halo_v_max", 0.0)
         if disk_med < disk_v_median_min:
             reasons.append(
                 f"disk median |v|={disk_med:.3f} < {disk_v_median_min} "
                 "(collapsed rotation — invalid or stale cordbh.dat / diskdf failure)"
             )
-        if disk_max > disk_v_max:
+        if disk_hot > disk_v_max:
             reasons.append(
-                f"disk v_max={disk_max:.2f} > {disk_v_max} "
-                "(hot outliers — bad cordbh.dat or DBH grid too coarse for diskdf)"
+                f"disk v_p9999={disk_hot:.2f} > {disk_v_max} "
+                f"(hot outliers — bad cordbh.dat or DBH grid too coarse for diskdf; "
+                f"v_max={disk_max:.2f})"
             )
         if disk_med > 0.0 and disk_max / disk_med > disk_v_max_ratio:
             reasons.append(
@@ -173,8 +191,10 @@ def explain_ic_instability(
                 f"disk R median={rmed:.2f} kpc < {disk_r_median_min} "
                 "(positions too central — gendisk must use invu, not -rd*ln(u))"
             )
-    elif diag.get("v_max", 0.0) > disk_v_max:
-        reasons.append(f"v_max={diag['v_max']:.2f} > {disk_v_max}")
+    else:
+        hot = float(diag.get("v_p9999", diag.get("v_max", 0.0)))
+        if hot > disk_v_max:
+            reasons.append(f"v_p9999={hot:.2f} > {disk_v_max}")
     if not reasons:
         return "IC velocity structure failed heuristic checks (unknown)"
     return "; ".join(reasons)

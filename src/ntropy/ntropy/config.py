@@ -229,6 +229,8 @@ class OutputConfig:
     diagnostics_every: int = 1
     particle_dump_every: int = 0
     write_particle_bins: bool = True
+    # Cast particle dumps to float32 (corpus / storage savings).
+    dump_float32: bool = False
     # Record total energy every N steps (1 = every step).  Larger strides cut
     # the O(N²) softened-potential cost and shrink the energies list for long runs.
     energy_every: int = 1
@@ -371,9 +373,10 @@ def load_config(path: PathLike) -> RunConfig:
     ana_raw = raw.get("analysis", {})
 
     method = force_raw.get("method", "bh")
-    if method not in ("brute", "bh", "bh_c"):
+    if method not in ("brute", "bh", "bh_c", "gpu_bh", "gpu_direct"):
         raise ValueError(
-            f"force.method must be 'brute', 'bh', or 'bh_c', got {method!r}"
+            "force.method must be 'brute', 'bh', 'bh_c', 'gpu_bh', or 'gpu_direct', "
+            f"got {method!r}"
         )
 
     integ_type = integ_raw.get("type", "leapfrog")
@@ -475,6 +478,7 @@ def load_config(path: PathLike) -> RunConfig:
             diagnostics_every=max(0, int(out_raw.get("diagnostics_every", 1))),
             particle_dump_every=max(0, int(out_raw.get("particle_dump_every", 0))),
             write_particle_bins=bool(out_raw.get("write_particle_bins", True)),
+            dump_float32=bool(out_raw.get("dump_float32", False)),
             energy_every=max(1, int(out_raw.get("energy_every", 1))),
         ),
         analysis=AnalysisConfig(

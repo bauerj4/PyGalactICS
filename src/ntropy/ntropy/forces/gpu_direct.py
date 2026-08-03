@@ -40,7 +40,10 @@ try:
 except ImportError:
     _cp = None  # type: ignore[assignment,misc]
 
-_GPU_AVAILABLE = _cp is not None and _cp.cuda.runtime.getDeviceCount() > 0
+try:
+    _GPU_AVAILABLE = _cp is not None and int(_cp.cuda.runtime.getDeviceCount()) > 0
+except Exception:  # noqa: BLE001 — driver missing / OS blocks CUDA
+    _GPU_AVAILABLE = False
 
 
 def gpu_available() -> bool:

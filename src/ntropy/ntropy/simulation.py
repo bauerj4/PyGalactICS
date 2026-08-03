@@ -151,6 +151,7 @@ class Simulation:
         output_dir: Path | None = None,
         show_progress: bool = False,
         progress_desc: str | None = None,
+        start_step: int = 0,
     ) -> tuple[ParticleState, list[float], TieredDiagnosticsLog]:
         """
         Run ntropy tiered leapfrog on ``state``.
@@ -183,12 +184,15 @@ class Simulation:
         progress_jsonl = None
         diagnostics_jsonl = None
         io_rank0 = mpi_rank0()
+        start_step = max(0, int(start_step))
         if output_dir is not None and out.diagnostics_every > 0:
             progress_jsonl = str(output_dir / "diagnostics.progress.jsonl")
             if io_rank0:
                 (output_dir / "diagnostics.progress.jsonl").write_text("")
                 diagnostics_jsonl = output_dir / "diagnostics.jsonl"
-                diagnostics_jsonl.write_text("")
+                # Fresh runs truncate; mid-run resumes append to keep prior records.
+                if start_step <= 0:
+                    diagnostics_jsonl.write_text("")
 
         def _maybe_dump(step: int, snap: ParticleState, acc: np.ndarray) -> None:
             if not io_rank0:
@@ -201,6 +205,7 @@ class Simulation:
                 particles_dir / f"step_{step:06d}.npz",
                 snap,
                 acc=acc,
+                float32=bool(getattr(out, "dump_float32", False)),
             )
 
         def accel_fn(
@@ -234,6 +239,7 @@ class Simulation:
             progress_desc=progress_desc,
             progress_style="ntropy",
             progress_jsonl=progress_jsonl,
+            start_step=start_step,
         )
 
         if output_dir is not None and out.diagnostics_every > 0 and io_rank0:
@@ -247,6 +253,8 @@ class Simulation:
         show_progress: bool = False,
         progress_desc: str | None = None,
         print_config: bool = False,
+        start_step: int = 0,
+        recenter: bool | None = None,
     ) -> SimulationResult:
         """Run the full simulation loop from the current configuration."""
         cfg = self.config
@@ -254,7 +262,9 @@ class Simulation:
             print(format_run_config(cfg, label=progress_desc), file=sys.stderr, flush=True)
 
         state = self.state.copy()
-        state.remove_center_of_mass()
+        do_recenter = (start_step <= 0) if recenter is None else bool(recenter)
+        if do_recenter:
+            state.remove_center_of_mass()
         energies: list[float] = []
         kinetic_energies: list[float] = []
         energies.append(
@@ -273,7 +283,7 @@ class Simulation:
 
         initial = state.copy()
         diag_log: TieredDiagnosticsLog | None = None
-        if cfg.output.every > 0 and mpi_rank0():
+        if cfg.output.every > 0 and mpi_rank0() and start_step <= 0:
             state.write_ascii(output_dir / "snapshot_0000.dat")
 
         if cfg.integrator.type == "tiered_leapfrog":
@@ -282,6 +292,7 @@ class Simulation:
                 output_dir=output_dir if needs_output_dir else None,
                 show_progress=show_progress,
                 progress_desc=progress_desc,
+                start_step=start_step,
             )
             energies = tier_energies if tier_energies else energies
             if cfg.output.write_final and mpi_rank0():

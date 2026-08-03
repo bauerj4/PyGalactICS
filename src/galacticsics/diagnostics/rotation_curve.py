@@ -48,7 +48,10 @@ def particle_rotation_curve(
     min_count: int = 20,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Binned mean azimuthal speed ``<v_phi>(R)`` [100 km/s].
+    Binned mass-weighted mean azimuthal speed ``<v_phi>(R)`` [100 km/s].
+
+    Empty / under-populated bins are ``NaN`` (not 0) so sparse outer-disk rings
+    do not look like a falling rotation curve as ``N`` decreases.
 
     Returns ``(v_phi_mean, counts)`` aligned with ``r_vals`` bin centers.
     """
@@ -72,13 +75,18 @@ def particle_rotation_curve(
         edges[0] = 0.0
         edges[1] = r_vals[0] * 1.1
 
+    mass = np.asarray(mass, dtype=float)
     v_mean = np.full(len(r_vals), np.nan, dtype=float)
     counts = np.zeros(len(r_vals), dtype=int)
     for i in range(len(r_vals)):
         mask = (r >= edges[i]) & (r < edges[i + 1])
         counts[i] = int(mask.sum())
         if counts[i] >= min_count:
-            v_mean[i] = float(np.mean(v_phi[mask]))
+            w = mass[mask]
+            if float(np.sum(w)) > 0.0:
+                v_mean[i] = float(np.average(v_phi[mask], weights=w))
+            else:
+                v_mean[i] = float(np.mean(v_phi[mask]))
     return v_mean, counts
 
 

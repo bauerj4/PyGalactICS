@@ -7,7 +7,10 @@
 #   make test-essential PR gate (docs/ci_essential.md)
 #   make loc            Lines of code (cloc; code / comment / blank)
 #   make example-mw    Milky Way potential demo
+#   make projections   Face-on / side-on component PNGs for a campaign
+#   make projections-clean  Remove campaign projection PNGs
 #   make clean         Remove build artifacts
+#   make papers-zip    Zip MNRAS Part~1 manuscript + figures for Drive upload
 
 PYTHON ?= python3
 VENV   ?= .venv
@@ -16,10 +19,17 @@ PYTEST = $(VENV)/bin/pytest
 PY     = $(VENV)/bin/python
 CLOC   ?= cloc
 
+# Campaign projection PNGs (face-on / side-on per component)
+CAMPAIGN_ROOT ?= runs/mw_morton_corpus_v2
+PROJECTION_SNAPSHOTS ?=
+PROJECTION_COMPONENTS ?=
+PROJECTION_DPI ?= 120
+PROJECTION_STEP_STRIDE ?= 1
+
 # Extra cloc flags (e.g. LOC_ARGS='--csv' make loc)
 LOC_ARGS ?=
 
-.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test test-essential loc cloc example-mw example-sample example-halo-first clean help
+.PHONY: all install-dev install-python-deps install-system-mpi generate-artifacts legacy-build legacy-samplers legacy-clean test test-essential loc cloc example-mw example-sample example-halo-first projections projections-clean papers-zip clean help
 
 all: install-dev legacy-build
 
@@ -37,6 +47,10 @@ help:
 	@echo "  example-solve  Run examples/solve_potential.py"
 	@echo "  example-sample Run examples/sample_galaxy.py"
 	@echo "  example-halo-first Run examples/halo_first_workflow.py"
+	@echo "  projections    Face-on/side-on PNGs per component under CAMPAIGN_ROOT"
+	@echo "                 (default: ic + particle steps + final; PROJECTION_STEP_STRIDE=N thins steps)"
+	@echo "  projections-clean  Remove */projections under CAMPAIGN_ROOT"
+	@echo "  papers-zip     Bundle papers/mnras_noneq_ics (tex/pdf/figs/bib) -> dist/mnras_noneq_ics_bundle.zip"
 	@echo "  clean          Remove .venv artifacts and legacy object files"
 
 install-system-mpi:
@@ -118,6 +132,35 @@ example-sample: install-dev legacy-samplers
 
 example-halo-first: install-dev legacy-build legacy-samplers
 	$(PY) examples/halo_first_workflow.py
+
+# Face-on (x–y) and side-on (x–z) surface-density PNGs for disk/bulge/halo.
+# Examples:
+#   make projections
+#   make projections CAMPAIGN_ROOT=runs/mw_morton_corpus
+#   make projections PROJECTION_SNAPSHOTS='ic steps' PROJECTION_STEP_STRIDE=5
+#   make projections PROJECTION_COMPONENTS='disk halo'
+projections:
+	@snap_args=""; \
+	comp_args=""; \
+	if [ -n "$(PROJECTION_SNAPSHOTS)" ]; then snap_args="--snapshots $(PROJECTION_SNAPSHOTS)"; fi; \
+	if [ -n "$(PROJECTION_COMPONENTS)" ]; then comp_args="--components $(PROJECTION_COMPONENTS)"; fi; \
+	$(PY) -m galacticsics.campaign.cli projections $(CAMPAIGN_ROOT) \
+		$$snap_args $$comp_args --dpi $(PROJECTION_DPI) \
+		--step-stride $(PROJECTION_STEP_STRIDE)
+
+projections-clean:
+	@if [ ! -d "$(CAMPAIGN_ROOT)" ]; then \
+		echo "CAMPAIGN_ROOT=$(CAMPAIGN_ROOT) not found"; exit 1; \
+	fi
+	@n=$$(find "$(CAMPAIGN_ROOT)" -mindepth 2 -maxdepth 2 -type d -name projections 2>/dev/null | wc -l); \
+	find "$(CAMPAIGN_ROOT)" -mindepth 2 -maxdepth 2 -type d -name projections -exec rm -rf {} + 2>/dev/null || true; \
+	echo "Removed $$n projections/ dir(s) under $(CAMPAIGN_ROOT)"
+
+# Bundle Part~1 manuscript for Google Drive (papers/ is gitignored).
+# Includes tex/pdf/bib/figs/figures_eps + small results/; excludes archive/,
+# run dumps, secrets. See BUNDLE_CONTENTS.md inside the zip.
+papers-zip:
+	@bash scripts/papers_zip.sh
 
 clean: legacy-clean
 	rm -rf $(VENV) build dist *.egg-info src/*.egg-info src/ntropy/*.egg-info

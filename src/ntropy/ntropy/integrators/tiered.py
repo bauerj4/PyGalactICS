@@ -44,6 +44,7 @@ def run_tiered_leapfrog(
     progress_style: Literal["ntropy", "tqdm", "both"] = "ntropy",
     progress_print_every: int = 1,
     progress_jsonl: str | None = None,
+    start_step: int = 0,
 ) -> tuple[ParticleState, list[float], TieredDiagnosticsLog]:
     """
     Integrate with GADGET-style dynamic, quantized per-particle timesteps.
@@ -88,6 +89,11 @@ def run_tiered_leapfrog(
         When set with ``on_record``, invoke the callback only on substeps where
         ``step % particle_dump_every == 0``.  ``None`` keeps legacy behaviour
         (callback on every diagnostic substep).
+    start_step : int
+        Fine-substep index already reached (e.g. from a particle dump).  The
+        loop continues from ``start_step + 1`` through ``n_steps``.  When
+        ``start_step > 0``, the initial dump/diagnostic at step 0 is skipped
+        so existing checkpoints are not overwritten.
 
     Returns
     -------
@@ -114,6 +120,11 @@ def run_tiered_leapfrog(
 
     t_end = end_time_gyr / code_time_to_gyr(1.0)
     n_steps = max(1, int(round(t_end / ts_config.dt_base)))
+    start_step = max(0, int(start_step))
+    if start_step > n_steps:
+        raise ValueError(
+            f"start_step={start_step} exceeds n_steps={n_steps} for end_time_gyr={end_time_gyr}"
+        )
 
     ntropy_reporter: NtropyProgressReporter | None = None
     use_ntropy = show_progress and progress_style in ("ntropy", "both")
@@ -128,6 +139,10 @@ def run_tiered_leapfrog(
             progress_jsonl=progress_jsonl,
         )
         ntropy_reporter.banner(dt_base=ts_config.dt_base)
+        if start_step > 0:
+            ntropy_reporter.note(
+                f"resuming from fine substep {start_step}/{n_steps}…"
+            )
         ntropy_reporter.note("initial force evaluation…")
 
     pos = state.pos
@@ -140,6 +155,11 @@ def run_tiered_leapfrog(
         e0=e0,
         jsonl_path=Path(diagnostics_jsonl) if diagnostics_jsonl is not None else None,
     )
+
+    if start_step >= n_steps:
+        if ntropy_reporter is not None:
+            ntropy_reporter.finish()
+        return state, energies, diag_log
 
     acc = accel_fn(pos)
     bins = update_timestep_bins(
@@ -160,7 +180,13 @@ def run_tiered_leapfrog(
             tags=state.tags,
         )
 
-    def _maybe_record(step_idx: int, n_active: int, current_acc: np.ndarray) -> None:
+    def _maybe_record(
+        step_idx: int,
+        n_active: int,
+        current_acc: np.ndarray,
+        *,
+        write_dump: bool = True,
+    ) -> None:
         if diagnostics_every <= 0:
             return
         if step_idx % diagnostics_every != 0 and step_idx != n_steps:
@@ -181,7 +207,7 @@ def run_tiered_leapfrog(
         diag_log.record(record)
         if ntropy_reporter is not None:
             ntropy_reporter.update(record)
-        if on_record is not None:
+        if write_dump and on_record is not None:
             dump_step = (
                 particle_dump_every is None
                 or particle_dump_every <= 0
@@ -190,11 +216,12 @@ def run_tiered_leapfrog(
             if dump_step:
                 on_record(step_idx, _snapshot_state(), current_acc)
 
-    _maybe_record(0, n_active=state.n, current_acc=acc)
+    if start_step == 0:
+        _maybe_record(0, n_active=state.n, current_acc=acc)
     if ntropy_reporter is not None:
         ntropy_reporter.note("integrating…")
 
-    step_range: range | object = range(1, n_steps + 1)
+    step_range: range | object = range(start_step + 1, n_steps + 1)
     if use_tqdm:
         try:
             from tqdm.auto import tqdm
@@ -206,8 +233,9 @@ def run_tiered_leapfrog(
             step_range,
             desc=progress_desc or "tiered leapfrog",
             unit="substep",
-            total=n_steps,
+            total=n_steps - start_step,
             mininterval=0.5,
+            initial=0,
         )
 
     for step in step_range:

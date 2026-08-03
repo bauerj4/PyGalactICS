@@ -173,7 +173,10 @@ class ForceContext:
         if self._gpu_bh_state is not None:
             detach = getattr(self._gpu_bh_state, "detach", None)
             if callable(detach):
-                detach()
+                try:
+                    detach(free_pool=True)
+                except TypeError:
+                    detach()
         self._gpu_bh_state = None
         self._mpi_cache.clear()
         self._step_count = 0

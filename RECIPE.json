@@ -1,0 +1,11 @@
+{
+  "name": "residual_f0_m2",
+  "phase": "A_hand_library_residual_on_f0",
+  "phase_b": "not_trained",
+  "equation": "f = T_phi(f0(theta); z) \u2248 dens'(f0, morph(z); alpha) + vel_f0",
+  "dens": "Sigma' = ring-renorm[ axisym(Sigma_f0) * max(1 + alpha * m2(Sigma_morph-axisym) / axisym(Sigma_morph), floor) ]  [multiplicative contrast; preserve Sigma_axisym]",
+  "kinematics": "GalactICS f0 velocities (kNN transplant on disk; retain halo/bulge)",
+  "morph_chart": "teacher AE recon of evolved dump (or deposit); conditioned via z/dump",
+  "radial_lock": "preserve_axisym + match_disk_radial_cdf_to_f0 after resample",
+  "ablation_baseline": "fft_recon_dens_amp_shell (AE dens+moments + m2 amplify)"
+}

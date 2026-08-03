@@ -13,6 +13,7 @@ architecture choices, phase plan, and code entry points.
 | What should we build instead? | **Field encoder first** (bin ρ, \|v\| per component), with **graph encoder** as the particle-local alternative. Multi-task heads on a shared latent. |
 | Can we use astro "foundation models"? | **Not drop-in.** Galactification / MOSAIC operate on cosmological fields or galaxy property vectors—not isolated MW disk+halo particle ICs. Borrow design patterns, not weights. |
 | How do we generate non-axisymmetric ICs? | **Coefficients + perturbation decoder**, not raw 200k-particle coordinate regression. |
+| Can we learn near-equilibrium particle lists? | Parallel track: **Morton-ordered sequence models** — see [`morton_generative.md`](morton_generative.md). Another parallel track: **multi-scale field maps** (slices/voxels/Φ AE) — see [`field_maps.md`](field_maps.md). |
 
 ## Problem framing
 

@@ -83,3 +83,6 @@ models/MilkyWay/**
 
 # --- Sphinx docs ---
 docs/_build/
+
+# --- Paper drafts / figures (local; ship via `make papers-zip`) ---
+papers/

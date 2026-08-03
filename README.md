@@ -1057,9 +1057,21 @@ cd docs && sphinx-build -b html . _build/html
 
 ## Citation
 
-Based on the GalactICS code of Kuijken & Dubinski for generating self-consistent
-galaxy initial conditions. If you use this library in published work, cite the
-original GalactICS papers and document the `galacticsics` version (`pip show galacticsics`).
+Based on the **GalactICS** (Galaxy Initial ConditionS) code of Kuijken, Dubinski,
+and Widrow for generating self-consistent near-equilibrium disc--bulge--halo
+$N$-body ICs
+([Kuijken & Dubinski 1995](https://ui.adsabs.harvard.edu/abs/1995MNRAS.277.1341K);
+[Widrow & Dubinski 2005](https://ui.adsabs.harvard.edu/abs/2005ApJ...631..838W);
+[Widrow, Pym & Dubinski 2008](https://ui.adsabs.harvard.edu/abs/2008ApJ...679.1239W)).
+Upstream Fortran/C lineage:
+[gitlab.com/jdubinski-group/GalactICS](https://gitlab.com/jdubinski-group/GalactICS).
+If you use this library in published work, cite those papers and document the
+`galacticsics` version (`pip show galacticsics`).
+
+MNRAS Part~1 draft (slightly non-eq ICs via θ-conditioned latent retrieve+decode)
+lives under `papers/mnras_noneq_ics/` (gitignored); bundle for Drive with
+`make papers-zip` → `dist/mnras_noneq_ics_bundle.zip`. Status notes:
+[`docs/ml_findings.md`](docs/ml_findings.md).
 
 ## License
 

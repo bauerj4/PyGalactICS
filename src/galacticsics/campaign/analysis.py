@@ -416,14 +416,13 @@ def disk_projections(
     n_bins: int = 128,
     z_slice: float | None = 0.3,
 ):
-    mask = component_mask(state, "disk")
-    pos, mass = state.pos[mask], state.mass[mask]
-    face_on = bin_plane_density(pos, mass, axes=(0, 1), n_bins=n_bins, half_extent=half_extent)
-    z_filter = np.abs(pos[:, 2]) < z_slice if z_slice is not None else None
-    edge_on = bin_plane_density(
-        pos, mass, axes=(0, 2), n_bins=n_bins, half_extent=half_extent, z_filter=z_filter
+    return component_projections(
+        state,
+        "disk",
+        half_extent=half_extent,
+        n_bins=n_bins,
+        z_slice=z_slice,
     )
-    return face_on, edge_on
 
 
 def halo_projections(
@@ -431,17 +430,227 @@ def halo_projections(
     *,
     half_extent: float = 40.0,
     n_bins: int = 96,
-    z_slice: float | None = 0.3,
+    z_slice: float | None = None,
 ):
-    """Face-on (x–y) and edge-on (x–z) volumetric-density maps for halo particles."""
-    mask = component_mask(state, "halo")
+    """Face-on (x–y) and side-on (x–z) surface-density maps for halo particles.
+
+    Side-on uses the full line of sight by default (no midplane cut) so the
+    halo stays roughly round rather than looking disk-like.
+    """
+    return component_projections(
+        state,
+        "halo",
+        half_extent=half_extent,
+        n_bins=n_bins,
+        z_slice=z_slice,
+    )
+
+
+_COMPONENT_PROJ_DEFAULTS: dict[str, dict[str, float | int | None]] = {
+    "disk": {"half_extent": 20.0, "n_bins": 128, "z_slice": 0.3},
+    # Full column for halo/bulge side-on — a thin |z| cut makes them look disk-like.
+    "halo": {"half_extent": 40.0, "n_bins": 96, "z_slice": None},
+    "bulge": {"half_extent": 5.0, "n_bins": 96, "z_slice": None},
+}
+
+
+def component_projections(
+    state: ParticleState,
+    component: str,
+    *,
+    half_extent: float | None = None,
+    n_bins: int | None = None,
+    z_slice: float | None | str = "default",
+):
+    """
+    Face-on (x–y) and side-on (x–z) projected surface-density maps for one component.
+
+    Parameters
+    ----------
+    state : ParticleState
+        Particle snapshot (uses ``tags`` or ``type_id`` via :func:`component_mask`).
+    component : str
+        ``disk``, ``halo``, or ``bulge``.
+    half_extent, n_bins, z_slice
+        Override per-component defaults.  Pass ``z_slice=None`` to project all
+        particles in the side-on map (no midplane cut).  Leave ``z_slice`` as
+        ``"default"`` to use the component-specific midplane cut.
+    """
+    defaults = _COMPONENT_PROJ_DEFAULTS.get(
+        component, {"half_extent": 20.0, "n_bins": 96, "z_slice": 0.3}
+    )
+    if half_extent is None:
+        half_extent = float(defaults["half_extent"])  # type: ignore[arg-type]
+    if n_bins is None:
+        n_bins = int(defaults["n_bins"])  # type: ignore[arg-type]
+    if z_slice == "default":
+        z_slice = defaults["z_slice"]  # type: ignore[assignment]
+    z_cut: float | None = None if z_slice is None else float(z_slice)
+
+    mask = component_mask(state, component)
+    if not np.any(mask):
+        raise ValueError(f"no particles tagged '{component}' in state (N={state.n})")
     pos, mass = state.pos[mask], state.mass[mask]
-    face_on = bin_plane_density(pos, mass, axes=(0, 1), n_bins=n_bins, half_extent=half_extent)
-    z_filter = np.abs(pos[:, 2]) < z_slice if z_slice is not None else None
-    edge_on = bin_plane_density(
+    face_on = bin_plane_density(
+        pos, mass, axes=(0, 1), n_bins=n_bins, half_extent=half_extent
+    )
+    z_filter = np.abs(pos[:, 2]) < z_cut if z_cut is not None else None
+    side_on = bin_plane_density(
         pos, mass, axes=(0, 2), n_bins=n_bins, half_extent=half_extent, z_filter=z_filter
     )
-    return face_on, edge_on
+    return face_on, side_on
+
+
+def present_components(state: ParticleState) -> list[str]:
+    """Ordered component labels present in ``state`` (disk, bulge, halo)."""
+    order = ("disk", "bulge", "halo")
+    return [name for name in order if np.any(component_mask(state, name))]
+
+
+def write_component_projection_pngs(
+    state: ParticleState,
+    out_dir: Path | str,
+    *,
+    components: list[str] | None = None,
+    label: str = "",
+    dpi: int = 120,
+    cmap: str = "inferno",
+) -> list[Path]:
+    """
+    Write face-on and side-on PNGs for each component into ``out_dir``.
+
+    Filenames: ``{component}_face_on.png`` and ``{component}_side_on.png``
+    (optional ``_{label}`` suffix before the extension when ``label`` is set).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    comps = components or present_components(state)
+    suffix = f"_{label}" if label else ""
+    written: list[Path] = []
+
+    for component in comps:
+        face, side = component_projections(state, component)
+        for view, dens_map, axes_label in (
+            ("face_on", face, "x–y"),
+            ("side_on", side, "x–z"),
+        ):
+            fig, ax = plt.subplots(figsize=(5.0, 4.5))
+            im = plot_density_map(
+                ax,
+                dens_map,
+                title=f"{component} {view.replace('_', '-')} ({axes_label})",
+                cmap=cmap,
+            )
+            ax.set_xlabel("x [kpc]")
+            ax.set_ylabel("y [kpc]" if view == "face_on" else "z [kpc]")
+            add_density_colorbar(
+                fig, im, ax, label=projection_colorbar_label(component)
+            )
+            path = out_dir / f"{component}_{view}{suffix}.png"
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            written.append(path)
+    return written
+
+
+def write_campaign_projection_pngs(
+    work_root: Path | str,
+    *,
+    snapshots: list[str] | None = None,
+    components: list[str] | None = None,
+    model_dirs: list[Path] | None = None,
+    dpi: int = 120,
+    step_stride: int = 1,
+) -> list[Path]:
+    """
+    Write component projection PNGs for every model under a campaign work root.
+
+    Parameters
+    ----------
+    work_root : path
+        Campaign directory containing per-model subfolders.
+    snapshots : list of str
+        Which states to plot.  ``ic`` uses ``ic_state.npz``; ``final`` uses
+        ``evolution/final.dat`` when present; ``latest`` uses the newest
+        ``evolution/particles/step_*.npz``; ``steps`` writes every dump
+        (optionally thinned by ``step_stride``) under
+        ``projections/step_XXXXXX/``.  Default: ``ic``, ``steps`` when dumps
+        exist, and ``final`` when available.
+    components : list of str, optional
+        Restrict to these components (default: all present in the state).
+    model_dirs : list of path, optional
+        Explicit model directories (default: every child with ``ic_state.npz``).
+    step_stride : int
+        When plotting ``steps``, keep every Nth dump (``1`` = all).
+    """
+    work_root = Path(work_root)
+    if model_dirs is None:
+        model_dirs = sorted(
+            p for p in work_root.iterdir() if p.is_dir() and (p / "ic_state.npz").is_file()
+        )
+    if not model_dirs:
+        raise FileNotFoundError(f"no model dirs with ic_state.npz under {work_root}")
+    stride = max(1, int(step_stride))
+
+    written: list[Path] = []
+    for model_dir in model_dirs:
+        ic = load_merged_state(model_dir)
+        particles_dir = model_dir / "evolution" / "particles"
+        dumps = (
+            sorted(particles_dir.glob("step_*.npz")) if particles_dir.is_dir() else []
+        )
+
+        if snapshots is not None:
+            wanted = list(snapshots)
+        else:
+            wanted = ["ic"]
+            if dumps:
+                wanted.append("steps")
+            if load_evolved_state(model_dir, ic) is not None:
+                wanted.append("final")
+
+        # (subdir_name, state) pairs — steps expand to many entries
+        to_write: list[tuple[str, ParticleState]] = []
+        for snap in wanted:
+            if snap == "ic":
+                to_write.append(("ic", ic))
+            elif snap == "final":
+                final = load_evolved_state(model_dir, ic)
+                if final is not None:
+                    to_write.append(("final", final))
+            elif snap == "latest":
+                if dumps:
+                    to_write.append(("latest", _load_particle_dump(dumps[-1], ic)))
+            elif snap == "steps":
+                selected = dumps[::stride]
+                # Always include the last dump if stride skipped it.
+                if dumps and dumps[-1] not in selected:
+                    selected = [*selected, dumps[-1]]
+                for dump_path in selected:
+                    to_write.append(
+                        (dump_path.stem, _load_particle_dump(dump_path, ic))
+                    )
+            else:
+                raise ValueError(
+                    f"unknown snapshot {snap!r}; use ic|final|latest|steps"
+                )
+
+        for snap_name, state in to_write:
+            out_dir = model_dir / "projections" / snap_name
+            written.extend(
+                write_component_projection_pngs(
+                    state,
+                    out_dir,
+                    components=components,
+                    dpi=dpi,
+                )
+            )
+    return written
 
 
 def load_run_diagnostics(work_dir: Path):
@@ -700,6 +909,37 @@ def projection_colorbar_label(component: str) -> str:
     return "log₁₀ Σ"
 
 
+def dens_array_log10(
+    dens,
+    *,
+    floor: float | None = None,
+    vmax_pct: float = 98.0,
+    vmax: float | None = None,
+) -> tuple[np.ndarray, float, float, float]:
+    """log10(Σ + ε) display array plus imshow limits for a raw dens map.
+
+    Returns ``(show, vmin, vmax_show, floor)`` where ``show = log10(max(Σ,0)+ε)``.
+    Pass shared ``floor`` / ``vmax`` across a column or row for matched stretch.
+    """
+    x = np.asarray(dens, dtype=np.float64)
+    pos = x[np.isfinite(x) & (x > 0)]
+    if floor is None:
+        if pos.size:
+            floor = max(
+                float(np.percentile(pos, 20)) * 1e-2,
+                float(np.percentile(pos, 99.0)) * 1e-4,
+                1e-12,
+            )
+        else:
+            floor = 1e-12
+    floor = float(max(floor, 1e-30))
+    if vmax is None:
+        vmax = float(np.percentile(pos, vmax_pct)) if pos.size else 1.0
+    vmax = float(max(vmax, 10.0 * floor))
+    show = np.log10(np.maximum(x, 0.0) + floor)
+    return show, float(np.log10(floor)), float(np.log10(vmax + floor)), floor
+
+
 def density_map_log10(density_map, *, log_floor: float = 1e-30) -> np.ndarray:
     """log10 surface density for imshow (shape matches ``density_map.density.T``)."""
     return np.log10(np.maximum(density_map.density.T, log_floor))
@@ -797,7 +1037,7 @@ def add_density_colorbar(
     mappable,
     axes,
     *,
-    label: str = "log₁₀ density",
+    label: str = "log₁₀ Σ",
     shrink: float = 0.85,
     pad: float = 0.02,
 ) -> Any:

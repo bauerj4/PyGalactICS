@@ -24,7 +24,7 @@ from galacticsics.campaign.parallel_budget import (
 )
 from galacticsics.campaign.progress import CampaignProgress, stream_ntropy_jsonl
 from galacticsics.campaign.serialize import model_to_dict
-from galacticsics.campaign.spec import GridSpec, expand_grid, model_hash
+from galacticsics.campaign.spec import GridSpec, expand_grid, model_hash, models_from_work_root
 from galacticsics.models import GalaxyModel
 
 Stage = Literal["solve", "sample", "evolve"]
@@ -362,6 +362,7 @@ def _write_evolve_config(
     max_timestep_bin: int = 6,
     timestep_update_every: int = 1,
     integrator_order: int = 2,
+    dump_float32: bool = False,
 ) -> Path:
     """
     Write ``ntropy_config.json`` for one campaign model's evolve stage.
@@ -436,6 +437,7 @@ def _write_evolve_config(
             "diagnostics_every": diagnostics_every,
             "particle_dump_every": particle_dump_every,
             "write_particle_bins": True,
+            "dump_float32": dump_float32,
         },
     }
     if cfg_path.is_file():
@@ -536,6 +538,51 @@ def _load_final_state(work_dir: Path):
     return ParticleState.from_file(final_path, config=cfg)
 
 
+def _latest_particle_dump(work_dir: Path) -> tuple[Path, int] | None:
+    """Return ``(path, fine_step)`` for the highest ``step_*.npz`` under evolution/particles."""
+    particles_dir = work_dir / "evolution" / "particles"
+    if not particles_dir.is_dir():
+        return None
+    best: tuple[Path, int] | None = None
+    for path in particles_dir.glob("step_*.npz"):
+        try:
+            step = int(path.stem.split("_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if best is None or step > best[1]:
+            best = (path, step)
+    return best
+
+
+def _load_particle_dump_state(path: Path, *, template):
+    """Load a mid-run ``step_*.npz`` into a :class:`ParticleState` (float64)."""
+    from ntropy.particles import ParticleState
+
+    with np.load(path, allow_pickle=True) as data:
+        kwargs: dict = {
+            "pos": np.asarray(data["pos"], dtype=np.float64),
+            "vel": np.asarray(data["vel"], dtype=np.float64),
+            "mass": np.asarray(data["mass"], dtype=np.float64),
+            "eps": np.asarray(data["eps"], dtype=np.float64),
+        }
+        if "type_id" in data:
+            kwargs["type_id"] = np.asarray(data["type_id"], dtype=np.int32)
+        elif template.type_id is not None:
+            kwargs["type_id"] = template.type_id.copy()
+        if "timestep_bin" in data:
+            kwargs["timestep_bin"] = np.asarray(data["timestep_bin"], dtype=np.int32)
+        state = ParticleState.from_arrays(**kwargs)
+    if template.tags is not None:
+        if state.n != template.n:
+            raise ValueError(
+                f"particle dump N={state.n} != template N={template.n} ({path.name})"
+            )
+        state.tags = template.tags.copy()
+    if state.type_id is None and template.type_id is not None:
+        state.type_id = template.type_id.copy()
+    return state
+
+
 def _run_evolve(
     work_dir: Path,
     *,
@@ -547,6 +594,7 @@ def _run_evolve(
     force_rebuild_every: int = 5,
     force_theta: float = 0.6,
     force_active_subset: bool = True,
+    force_method: str | None = None,
     mpi_local_trees: bool = True,
     dt_base: float = 0.025,
     timestep_eta: float = 0.025,
@@ -559,6 +607,8 @@ def _run_evolve(
     raw_config: dict | None = None,
     progress: CampaignProgress | None = None,
     evolve_label: str = "evolve",
+    dump_float32: bool = False,
+    resume_from_dumps: bool = True,
 ) -> dict:
     """
     Merge sampled ICs and run the N-body evolve stage for one model.
@@ -609,6 +659,7 @@ def _run_evolve(
     from ntropy.config import load_config
     from ntropy.integrations.galacticsics import merge_galacticsics_components
     from ntropy.simulation import Simulation
+    from ntropy.units import code_time_to_gyr
 
     walk_cfg = raw_config or default_walkthrough_config()
     if eps_by_component is None:
@@ -643,7 +694,7 @@ def _run_evolve(
             )
         progress.log(f"  parallel: {format_parallel_budget(parallel_budget)}")
         progress.log(
-            f"  force: {_default_force_method()} | bh_optimizations preset={bh_opts.preset} "
+            f"  force: {force_method or _default_force_method()} | bh_optimizations preset={bh_opts.preset} "
             f"| mpi_local_trees={mpi_local_trees}"
         )
 
@@ -654,6 +705,7 @@ def _run_evolve(
         diagnostics_every=diagnostics_every,
         particle_dump_every=particle_dump_every,
         mpi_ranks=effective_mpi_ranks,
+        force_method=force_method,
         bh_optimizations=bh_opts,
         force_rebuild_every=force_rebuild_every,
         force_theta=force_theta,
@@ -664,6 +716,7 @@ def _run_evolve(
         max_timestep_bin=max_timestep_bin,
         timestep_update_every=timestep_update_every,
         integrator_order=integrator_order,
+        dump_float32=dump_float32,
     )
     state.write_ascii(work_dir / "merged.dat")
     _save_ic_state(state, work_dir)
@@ -685,9 +738,40 @@ def _run_evolve(
             progress.log(f"  ERROR: {msg}")
         raise RuntimeError(msg)
 
+    start_step = 0
+    n_substeps_target = max(
+        1, int(round(end_time_gyr / code_time_to_gyr(1.0) / dt_base))
+    )
+    if resume_from_dumps and not use_mpi:
+        latest = _latest_particle_dump(work_dir)
+        if latest is not None:
+            dump_path, dump_step = latest
+            if 0 < dump_step < n_substeps_target:
+                state = _load_particle_dump_state(dump_path, template=state)
+                start_step = dump_step
+                msg = (
+                    f"  resume evolve from {dump_path.name} "
+                    f"(step {start_step}/{n_substeps_target})"
+                )
+                if progress and progress.enabled:
+                    progress.log(msg)
+                else:
+                    print(msg, flush=True)
+            elif dump_step >= n_substeps_target and progress and progress.enabled:
+                progress.log(
+                    f"  latest dump {dump_path.name} already at/beyond end "
+                    f"({dump_step}/{n_substeps_target}); continuing from IC"
+                )
+    elif resume_from_dumps and use_mpi and progress and progress.enabled:
+        latest = _latest_particle_dump(work_dir)
+        if latest is not None and latest[1] > 0:
+            progress.log(
+                f"  note: ignoring mid-run dump {latest[0].name} "
+                "(MPI evolve always starts from IC)"
+            )
+
     if use_mpi:
         from ntropy.benchmark.mpi_subprocess import run_mpirun_simulation
-        from ntropy.units import code_time_to_gyr
 
         cfg = load_config(cfg_path)
         cfg_dt_base = cfg.integrator.dt_base or cfg.integrator.timestep.dt_base
@@ -764,6 +848,7 @@ def _run_evolve(
             show_progress=bool(progress and progress.enabled),
             progress_desc=evolve_label,
             print_config=bool(progress and progress.enabled),
+            start_step=start_step,
         )
     elapsed = time.perf_counter() - t0
     e0 = result.energies[0] if result.energies else 0.0
@@ -778,9 +863,48 @@ def _run_evolve(
         "n_energies": len(result.energies),
         "n_ranks": 1,
         "mpi": False,
+        "resume_start_step": start_step,
         "rotation_curve_ic": ic_rot_path,
         "rotation_curve_final": final_rot_path,
     }
+
+
+def _evolve_worker(payload: dict) -> dict:
+    """Picklable evolve entry for GPU process-pool batching."""
+    from ntropy.config import BhOptimizationsConfig
+
+    work_dir = Path(payload["work_dir"])
+    bh_raw = payload.get("bh_optimizations") or {"preset": "optimized"}
+    bh_opts = BhOptimizationsConfig.from_dict(bh_raw)
+    summary = _run_evolve(
+        work_dir,
+        end_time_gyr=float(payload["end_time_gyr"]),
+        diagnostics_every=int(payload["diagnostics_every"]),
+        particle_dump_every=int(payload["particle_dump_every"]),
+        mpi_ranks=int(payload["mpi_ranks"]),
+        core_fraction=float(payload["core_fraction"]),
+        force_rebuild_every=int(payload["force_rebuild_every"]),
+        force_theta=float(payload["force_theta"]),
+        force_active_subset=bool(payload["force_active_subset"]),
+        force_method=payload.get("force_method"),
+        mpi_local_trees=bool(payload["mpi_local_trees"]),
+        dt_base=float(payload["dt_base"]),
+        timestep_eta=float(payload["timestep_eta"]),
+        max_timestep_bin=int(payload["max_timestep_bin"]),
+        timestep_update_every=int(payload["timestep_update_every"]),
+        integrator_order=int(payload["integrator_order"]),
+        bh_optimizations=bh_opts,
+        eps_by_component=payload.get("eps_by_component"),
+        raw_config=payload.get("raw_config"),
+        progress=None,
+        evolve_label=str(payload.get("evolve_label", "evolve")),
+        dump_float32=bool(payload.get("dump_float32", False)),
+        resume_from_dumps=bool(payload.get("resume_from_dumps", True)),
+    )
+    summary["work_dir"] = str(work_dir)
+    summary["label"] = payload.get("label", "")
+    summary["hash"] = payload.get("hash", "")
+    return summary
 
 
 def run_campaign(
@@ -807,6 +931,7 @@ def run_campaign(
     force_rebuild_every: int = 5,
     force_theta: float = 0.6,
     force_active_subset: bool = True,
+    force_method: str | None = None,
     mpi_local_trees: bool = True,
     bh_optimizations_preset: str = "optimized",
     bh_optimizations_extra: dict | None = None,
@@ -814,6 +939,8 @@ def run_campaign(
     raw_config: dict | None = None,
     solve_kwargs: dict | None = None,
     progress: CampaignProgress | None = None,
+    gpu_batch_size: int = 1,
+    dump_float32: bool = False,
 ) -> CampaignManifest:
     """
     Execute a parameter grid campaign.
@@ -880,7 +1007,25 @@ def run_campaign(
     manifest = CampaignManifest(name=spec.name, work_root=work_root)
 
     reporter = progress if progress is not None else CampaignProgress(enabled=verbose)
+
     models = list(expand_grid(spec))
+    if skip_done:
+        existing = models_from_work_root(work_root, require_sample=True)
+        if existing:
+            by_hash: dict[str, tuple[str, GalaxyModel]] = {}
+            for label, model in existing:
+                by_hash[model_hash(model)] = (label, model)
+            # Fill remaining slots from the deterministic grid subsample.
+            for label, model in models:
+                h = model_hash(model)
+                if h not in by_hash and len(by_hash) < max(spec.max_points, len(existing)):
+                    by_hash[h] = (label, model)
+            models = list(by_hash.values())
+            reporter.log(
+                f"Resuming {len(existing)} sampled model(s) from {work_root}; "
+                f"total this run: {len(models)}"
+            )
+
     from galacticsics.physics.backend import resolve_physics_backend
     from ntropy.config import BhOptimizationsConfig
 
@@ -930,8 +1075,14 @@ def run_campaign(
             "diagnostics_every": diagnostics_every,
             "skip_done": skip_done,
             "physics_backend": physics_backend,
+            "force_method": force_method or _default_force_method(),
+            "gpu_batch_size": gpu_batch_size,
+            "dump_float32": dump_float32,
         },
     )
+
+    pending_evolve: list[dict] = []
+    row_by_hash: dict[str, dict] = {}
 
     for model_idx, (label, model) in enumerate(models, start=1):
         mhash = model_hash(model)
@@ -1003,20 +1154,32 @@ def run_campaign(
                     detail=parts_summary or "no particles requested",
                 )
                 t0 = time.perf_counter()
-                summary = _run_sample(
-                    model,
-                    model_dir,
-                    particles_by_component=particles_by_component,
-                    progress=reporter,
-                    backend=physics_backend,
-                    eps_by_component=eps_by_component,
-                    type_registry=type_registry,
-                    raw_config=cfg,
-                )
+                try:
+                    summary = _run_sample(
+                        model,
+                        model_dir,
+                        particles_by_component=particles_by_component,
+                        progress=reporter,
+                        backend=physics_backend,
+                        eps_by_component=eps_by_component,
+                        type_registry=type_registry,
+                        raw_config=cfg,
+                    )
+                except RuntimeError as exc:
+                    # One bad IC must not abort a multi-model corpus campaign.
+                    reporter.log(f"  SKIP sample/evolve: {exc}")
+                    row["sample_error"] = str(exc)
+                    row["skipped_evolve"] = True
+                    reporter.end_stage("sample", time.perf_counter() - t0, {"error": str(exc)})
+                    row_by_hash[mhash] = row
+                    append_manifest_row(manifest, row)
+                    reporter.end_model(time.perf_counter() - model_t0)
+                    continue
                 row.update(summary)
                 reporter.end_stage("sample", time.perf_counter() - t0, summary)
                 marker.touch()
 
+        evolve_queued = False
         if "evolve" in stages:
             marker = _model_done_marker(model_dir, "evolve")
             evolve_ok = (
@@ -1029,6 +1192,36 @@ def run_campaign(
             )
             if evolve_ok and skip_done and marker.exists():
                 reporter.skip_stage("evolve", reason=".done_evolve")
+            elif gpu_batch_size > 1:
+                evolve_queued = True
+                reporter.log(f"  queue evolve for GPU batch (size={gpu_batch_size})")
+                pending_evolve.append(
+                    {
+                        "work_dir": str(model_dir),
+                        "label": label,
+                        "hash": mhash,
+                        "end_time_gyr": end_time_gyr,
+                        "diagnostics_every": diagnostics_every,
+                        "particle_dump_every": particle_dump_every,
+                        "mpi_ranks": mpi_ranks,
+                        "core_fraction": core_fraction,
+                        "force_rebuild_every": force_rebuild_every,
+                        "force_theta": force_theta,
+                        "force_active_subset": force_active_subset,
+                        "force_method": force_method,
+                        "mpi_local_trees": mpi_local_trees,
+                        "dt_base": dt_base,
+                        "timestep_eta": timestep_eta,
+                        "max_timestep_bin": max_timestep_bin,
+                        "timestep_update_every": timestep_update_every,
+                        "integrator_order": integrator_order,
+                        "bh_optimizations": bh_optimizations.to_config_dict(),
+                        "eps_by_component": eps_by_component,
+                        "raw_config": cfg,
+                        "evolve_label": f"{label} evolve",
+                        "dump_float32": dump_float32,
+                    }
+                )
             else:
                 if skip_done and marker.exists():
                     reporter.log(
@@ -1054,6 +1247,7 @@ def run_campaign(
                     force_rebuild_every=force_rebuild_every,
                     force_theta=force_theta,
                     force_active_subset=force_active_subset,
+                    force_method=force_method,
                     mpi_local_trees=mpi_local_trees,
                     dt_base=dt_base,
                     timestep_eta=timestep_eta,
@@ -1066,13 +1260,38 @@ def run_campaign(
                     raw_config=cfg,
                     progress=reporter,
                     evolve_label=f"{label} evolve",
+                    dump_float32=dump_float32,
                 )
                 row.update(summary)
                 reporter.end_stage("evolve", time.perf_counter() - t0, summary)
                 marker.touch()
 
-        append_manifest_row(manifest, row)
-        reporter.end_model(time.perf_counter() - model_t0)
+        row_by_hash[mhash] = row
+        if not evolve_queued:
+            append_manifest_row(manifest, row)
+            reporter.end_model(time.perf_counter() - model_t0)
+
+    if pending_evolve:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        batch = max(1, int(gpu_batch_size))
+        reporter.log(f"GPU evolve: {len(pending_evolve)} queued, batch_size={batch}")
+        for i in range(0, len(pending_evolve), batch):
+            chunk = pending_evolve[i : i + batch]
+            reporter.log(f"  evolving batch {i // batch + 1}: {len(chunk)} sims")
+            t0 = time.perf_counter()
+            with ProcessPoolExecutor(max_workers=len(chunk)) as pool:
+                futures = {pool.submit(_evolve_worker, job): job for job in chunk}
+                for fut in as_completed(futures):
+                    job = futures[fut]
+                    summary = fut.result()
+                    mhash = str(job["hash"])
+                    row = row_by_hash[mhash]
+                    row.update(summary)
+                    _model_done_marker(Path(job["work_dir"]), "evolve").touch()
+                    append_manifest_row(manifest, row)
+                    reporter.log(f"  done {job['label']} ({mhash[:8]})")
+            reporter.log(f"  batch wall time {time.perf_counter() - t0:.1f}s")
 
     reporter.finish()
     return manifest
@@ -1111,8 +1330,15 @@ def run_campaign_from_config(
     else:
         cfg = load_walkthrough_config(config_path, repo=Path(repo) if repo else None)
     cfg.ensure_artifact_dirs()
-    spec = grid_spec or cfg.base_grid
-    root = Path(work_root) if work_root is not None else cfg.paths.base_root
+    if grid_spec is not None:
+        spec = grid_spec
+    elif cfg.sweep_enabled:
+        spec = cfg.sweep_grid() or cfg.base_grid
+    else:
+        spec = cfg.base_grid
+    root = Path(work_root) if work_root is not None else (
+        cfg.paths.sweep_root if cfg.sweep_enabled else cfg.paths.base_root
+    )
     kwargs = dict(cfg.run_campaign_kwargs())
     extra = kwargs.pop("bh_optimizations_extra", None)
     kwargs["raw_config"] = cfg.raw

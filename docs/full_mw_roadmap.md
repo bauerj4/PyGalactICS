@@ -54,12 +54,12 @@ scope until CPU optimizations P1–P4 are measured at N ~ 10⁵–10⁶.
 
 For surrogate models and cross-run similarity, export particle tokens from
 campaign checkpoints and encode with transformer or graph networks.  See
-[ml_representation_roadmap.md](ml_representation_roadmap.md).  PyTorch is
+[archive/ml_representation_roadmap.md](archive/ml_representation_roadmap.md).  PyTorch is
 optional (`pip install galacticsics[ml]`); feature export is numpy-only.
 
 ## Related
 
 - [performance_roadmap.md](performance_roadmap.md)
-- [ml_representation_roadmap.md](ml_representation_roadmap.md)
+- [archive/ml_representation_roadmap.md](archive/ml_representation_roadmap.md)
 - [../src/ntropy/HISTORY.md](../src/ntropy/HISTORY.md)
 - [../campaigns/mw_grid.json](../campaigns/mw_grid.json) — example grid spec

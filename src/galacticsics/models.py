@@ -305,6 +305,20 @@ class GalaxyModel:
         )
 
     @classmethod
+    def milky_way_disk_halo_bulge(cls) -> GalaxyModel:
+        """
+        Milky Way disk+halo+Sersic bulge (production grid).
+
+        Bulge defaults are MW-like (n=4, ``v0=2.0``, ``a=0.5`` kpc) for Morton
+        generative corpus sweeps; patch ``bulge.*`` axes to vary.
+        """
+        base = cls.milky_way_disk_halo()
+        return replace(
+            base,
+            bulge=SersicBulge(n_sersic=4.0, ppp=0.5, v0=2.0, a=0.5, enabled=True),
+        )
+
+    @classmethod
     def reference_disk_halo(cls) -> GalaxyModel:
         """
         Reference disk+halo model for artifact generation and tests.

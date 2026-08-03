@@ -221,6 +221,22 @@ def _gpu_sync(label: str) -> None:
         logger.warning("[GPU-BH] Sync error during '%s': %s", label, exc)
 
 
+def _cupy_free_pooled_blocks() -> None:
+    """Return unused CuPy pool blocks to the driver (nvidia-smi 'used').
+
+    Tree size fluctuates every leapfrog step, so unreclaimed pool bins of
+    nearly-equal sizes accumulate and VRAM climbs until the process exits.
+    Call after dropping device array references.
+    """
+    if _cp is None:
+        return
+    try:
+        _cp.get_default_memory_pool().free_all_blocks()
+        _cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception as exc:
+        logger.debug("[GPU-BH] pool free skipped: %s", exc)
+
+
 def _log_timer(label: str, t0: float, msg: str = "") -> None:
     """Log a timing message at debug level.  No GPU sync needed."""
     elapsed = (time() - t0) * 1000
@@ -540,12 +556,21 @@ class GpuBhState:
                  self.d_sz, self.d_ms, self.d_il,
                  self.d_ch, self.d_ls, self.d_lc))
 
-    def detach(self) -> None:
-        """Free GPU memory."""
+    def detach(self, *, free_pool: bool = False) -> None:
+        """Drop device buffer references (and optionally return pool blocks).
+
+        Parameters
+        ----------
+        free_pool : bool
+            When True, call CuPy ``free_all_blocks`` so nvidia-smi reflects
+            released VRAM. Safe between force evals that rebuild the tree.
+        """
         for attr in ("d_nodes_flat", "d_leaf_indices",
                       "d_cx", "d_cy", "d_cz", "d_mx", "d_my", "d_mz",
                       "d_sz", "d_ms", "d_il", "d_ch", "d_ls", "d_lc"):
             setattr(self, attr, None)
+        if free_pool:
+            _cupy_free_pooled_blocks()
 
     def is_ready(self) -> bool:
         """Return True if the tree data is resident on the GPU."""
@@ -659,6 +684,9 @@ def _prepare_tree_state(
     n_leaf = int(leaf_raw.size)
 
     st = GpuBhState(n_nodes=n_nodes, n_particles=len(mass)) if state is None else state
+    # Drop prior SoA / pack refs before realloc so CuPy can recycle (or free)
+    # instead of retaining every prior tree's size bin in the memory pool.
+    st.detach(free_pool=False)
     st.n_nodes = n_nodes
     st.n_particles = len(mass)
     st.leaf_direct = leaf_direct
@@ -781,6 +809,7 @@ def compute_forces_gpu_bh(
         targets = np.asarray(target_indices, dtype=np.int32)
         n_targets = len(targets)
 
+    ephemeral = state is None
     st, n_nodes, n_leaf = _prepare_tree_state(
         cp, pos, mass, eps, state, bh_opts=bh_opts
     )
@@ -792,12 +821,23 @@ def compute_forces_gpu_bh(
     d_acc = cp.zeros((n_targets, 3), dtype=cp.float64)
 
     wk, _ = _ensure_bh_kernels(cp)
-    _launch_bh_walk(
-        cp, wk, st, d_pos, d_mass, d_eps, d_idx,
-        n_leaf, n_targets, n_nodes, n, theta, d_acc,
-    )
-    cp.cuda.runtime.deviceSynchronize()
+    try:
+        _launch_bh_walk(
+            cp, wk, st, d_pos, d_mass, d_eps, d_idx,
+            n_leaf, n_targets, n_nodes, n, theta, d_acc,
+        )
+        cp.cuda.runtime.deviceSynchronize()
+        result = cp.asnumpy(d_acc)
+    finally:
+        # Drop walk temporaries every call. Tree buffers: free when ephemeral
+        # (evolve scripts); when caller passes GpuBhState, keep SoA until the
+        # next rebuild replaces them (see detach in _prepare_tree_state) but
+        # still return unused pool bins so VRAM does not climb across steps.
+        del d_pos, d_mass, d_eps, d_idx, d_acc
+        if ephemeral:
+            st.detach(free_pool=True)
+        else:
+            _cupy_free_pooled_blocks()
 
-    result = cp.asnumpy(d_acc)
     logger.debug("[GPU-BH] Complete: %.1fms total", (time() - t0) * 1000)
     return result

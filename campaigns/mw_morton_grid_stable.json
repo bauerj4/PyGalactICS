@@ -1,0 +1,18 @@
+{
+  "name": "mw_morton_stable",
+  "base": "milky_way_disk_halo_bulge",
+  "axes": {
+    "halo.v0": [3.5, 3.8, 4.2],
+    "halo.a": [30.0, 40.0],
+    "disk.mass": [6.0, 10.0, 14.0, 18.0, 22.0, 26.0],
+    "disk.scale_length": [2.5, 3.0, 3.5],
+    "disk.scale_height": [0.35, 0.45, 0.55],
+    "disk_kinematics.toomre_q_target": [2.5, 3.0, 3.5],
+    "bulge.v0": [1.5, 2.0],
+    "bulge.a": [0.5, 0.7]
+  },
+  "omit_components": [[]],
+  "coarse_grid": true,
+  "max_points": 36,
+  "physics_backend": "python"
+}

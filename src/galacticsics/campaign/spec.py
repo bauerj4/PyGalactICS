@@ -9,6 +9,8 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from galacticsics.models import GalaxyModel
 
 # GalaxyModel sub-objects editable via dot-path patch / grid axes.
@@ -77,11 +79,21 @@ class GridSpec:
 def _base_model(name: str) -> GalaxyModel:
     factories = {
         "milky_way_disk_halo": GalaxyModel.milky_way_disk_halo,
+        "milky_way_disk_halo_bulge": GalaxyModel.milky_way_disk_halo_bulge,
         "reference_disk_halo": GalaxyModel.reference_disk_halo,
     }
     if name not in factories:
         raise ValueError(f"unknown base model {name!r}")
     return factories[name]()
+
+
+def _default_component(comp: str):
+    """Instantiate a missing patchable component (e.g. bulge on disk+halo bases)."""
+    from galacticsics.models import SersicBulge
+
+    if comp == "bulge":
+        return SersicBulge(n_sersic=4.0, ppp=0.5, v0=2.0, a=0.5, enabled=True)
+    raise ValueError(f"model has no component {comp!r}")
 
 
 def _set_nested(model: GalaxyModel, path: str, value: Any) -> GalaxyModel:
@@ -91,7 +103,8 @@ def _set_nested(model: GalaxyModel, path: str, value: Any) -> GalaxyModel:
     comp, attr = parts
     obj = getattr(model, comp)
     if obj is None:
-        raise ValueError(f"model has no component {comp!r}")
+        obj = _default_component(comp)
+        model = replace(model, **{comp: obj})
     return replace(model, **{comp: replace(obj, **{attr: value})})
 
 
@@ -296,6 +309,43 @@ def model_hash(model: GalaxyModel) -> str:
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
+def models_from_work_root(
+    work_root: Path | str,
+    *,
+    require_sample: bool = True,
+) -> list[tuple[str, GalaxyModel]]:
+    """
+    Load ``(label, model)`` pairs from existing campaign model directories.
+
+    Used to resume a corpus after a prior run selected a different random
+    subsample (or after a crash). Directories must contain ``model.json``.
+    When ``require_sample`` is True, only dirs with ``.done_sample`` or a
+    ``disk`` particle file are included.
+    """
+    from galacticsics.campaign.serialize import model_from_dict
+
+    work_root = Path(work_root)
+    if not work_root.is_dir():
+        return []
+    results: list[tuple[str, GalaxyModel]] = []
+    for path in sorted(work_root.iterdir()):
+        if not path.is_dir():
+            continue
+        model_path = path / "model.json"
+        if not model_path.is_file():
+            continue
+        if require_sample and not (
+            (path / ".done_sample").is_file() or (path / "disk").is_file()
+        ):
+            continue
+        try:
+            model = model_from_dict(json.loads(model_path.read_text()))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        results.append((f"resume_{path.name}", model))
+    return results
+
+
 def expand_grid(spec: GridSpec) -> list[tuple[str, GalaxyModel]]:
     """
     Expand a grid spec into (label, GalaxyModel) pairs.
@@ -319,15 +369,20 @@ def expand_grid(spec: GridSpec) -> list[tuple[str, GalaxyModel]]:
     axis_keys = sorted(spec.axes.keys())
     axis_vals = [spec.axes[k] for k in axis_keys]
     combos = list(product(*axis_vals)) if axis_vals else [()]
-
-    if len(combos) * max(1, len(spec.omit_components) or 1) > spec.max_points:
-        raise ValueError(
-            f"grid would exceed max_points={spec.max_points}; "
-            f"reduce axes or raise max_points"
-        )
-
     omit_patterns = spec.omit_components or [[]]
-    for combo in combos:
+    total = len(combos) * max(1, len(omit_patterns))
+    selected_combos = combos
+    if total > spec.max_points:
+        # Deterministic subsample for ML corpora (factorial grids explode quickly).
+        # Use sha256 — NOT Python's hash(), which is randomized per process and would
+        # reshuffle the corpus on every campaign relaunch (breaking skip_done).
+        seed = int(hashlib.sha256(spec.name.encode("utf-8")).hexdigest()[:8], 16)
+        rng = np.random.default_rng(seed)
+        n_keep = max(1, spec.max_points // max(1, len(omit_patterns)))
+        idx = rng.choice(len(combos), size=min(n_keep, len(combos)), replace=False)
+        selected_combos = [combos[i] for i in sorted(idx.tolist())]
+
+    for combo in selected_combos:
         model = base
         label_parts: list[str] = []
         for key, val in zip(axis_keys, combo):
@@ -340,6 +395,51 @@ def expand_grid(spec: GridSpec) -> list[tuple[str, GalaxyModel]]:
             results.append((label, m))
 
     return results
+
+
+def expand_grids(specs: list[GridSpec]) -> list[tuple[str, GalaxyModel]]:
+    """
+    Expand one or more grid specs and merge with de-duplication by model hash.
+
+    Labels are prefixed with ``{spec.name}::`` when more than one spec is given
+    so suite provenance stays visible in manifests.
+    """
+    if not specs:
+        return []
+    multi = len(specs) > 1
+    seen: set[str] = set()
+    results: list[tuple[str, GalaxyModel]] = []
+    for spec in specs:
+        for label, model in expand_grid(spec):
+            h = model_hash(model)
+            if h in seen:
+                continue
+            seen.add(h)
+            full_label = f"{spec.name}::{label}" if multi else label
+            results.append((full_label, model))
+    return results
+
+
+def grids_as_list_spec(
+    name: str,
+    pairs: list[tuple[str, GalaxyModel]],
+    *,
+    base: str = "milky_way_disk_halo_bulge",
+    coarse_grid: bool = True,
+    physics_backend: str = "python",
+) -> GridSpec:
+    """Pack expanded ``(label, model)`` pairs into a ``grid_mode='list'`` spec."""
+    from galacticsics.campaign.serialize import model_to_dict
+
+    return GridSpec(
+        name=name,
+        base=base,
+        grid_mode="list",
+        models=[model_to_dict(model) for _, model in pairs],
+        coarse_grid=coarse_grid,
+        physics_backend=physics_backend,
+        max_points=max(len(pairs), 1),
+    )
 
 
 def load_grid_spec(path: Path | str) -> GridSpec:
