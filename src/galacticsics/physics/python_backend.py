@@ -23,7 +23,7 @@ def python_solve_potential(
     *,
     npsi: int = 1000,
     nint: int = 20,
-    max_iter: int = 100,
+    max_iter: int | None = None,
     n_workers: int | None = None,
     timeout: float | None = None,
     stream_output: bool = False,
@@ -40,7 +40,8 @@ def python_solve_potential(
     npsi, nint : int, optional
         Energy-grid resolution and Eddington quadrature count.
     max_iter : int, optional
-        Poisson iteration cap.
+        Poisson iteration cap. When omitted, the solver chooses a cap suitable
+        for the selected disk-density contract.
     n_workers : int or None, optional
         Thread pool size for polar quadrature (``0`` disables parallelism).
     timeout, stream_output

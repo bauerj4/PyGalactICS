@@ -337,13 +337,20 @@ def validate_disk_df(
         return out
 
     corr = read_disk_correction(cordbh_path)
-    f_d_min = float(corr.f_d.min())
-    # Outer truncation radii commonly clip f_sz to 1e-3; score the inner disk.
+    # Correction factors can legitimately collapse in the exponentially
+    # negligible outer taper; score the mass-carrying inner disk.
     r_inner = 4.0 * float(disk_params.scale_length)
     inner = (corr.radius > 0.0) & (corr.radius <= r_inner)
     if not np.any(inner):
         inner = corr.radius > 0.0
-    f_sz_med = float(np.median(corr.f_sz[inner])) if np.any(inner) else float(corr.f_sz.min())
+    f_d_min = (
+        float(np.min(corr.f_d[inner])) if np.any(inner) else float(corr.f_d.min())
+    )
+    f_sz_med = (
+        float(np.median(corr.f_sz[inner]))
+        if np.any(inner)
+        else float(corr.f_sz.min())
+    )
     cordbh_valid = cordbh_is_valid(cordbh_path)
 
     _, _, v_r, _, _ = _cylindrical_kinematics(state.pos[mask], state.vel[mask])
@@ -377,13 +384,13 @@ def validate_disk_df(
     df_positive_frac = float("nan")
     if (work_dir / "dbh.dat").is_file() and (work_dir / "freqdbh.dat").is_file():
         from galacticsics.distribution.diskdf_solve import _RcircInterpolator, _diskdf5ez
-        from galacticsics.numerics import natural_cubic_spline
+        from galacticsics.numerics import bounded_linear_interpolator
 
         pot = read_harmonic_potential(work_dir / "dbh.dat")
         freq = read_frequency_table(work_dir / "freqdbh.dat")
         rcirc_fn = _RcircInterpolator(pot, freq)
-        spline_d = natural_cubic_spline(corr.radius, corr.f_d)
-        spline_sz = natural_cubic_spline(corr.radius, corr.f_sz)
+        spline_d = bounded_linear_interpolator(corr.radius, corr.f_d)
+        spline_sz = bounded_linear_interpolator(corr.radius, corr.f_sz)
 
         rng = rng or np.random.default_rng(1)
         idx = _subsample_indices(n, max_samples=max_samples, rng=rng)

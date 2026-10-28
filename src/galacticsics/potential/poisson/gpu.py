@@ -60,6 +60,8 @@ def fill_density_harmonics_cupy(
     cutoff_potential: float,
     halo_psi_tables,
     bulge_psi_tables,
+    disk_vertical_norm_radii: np.ndarray,
+    disk_vertical_norm_values: np.ndarray,
 ) -> None:
     """
     Fill ``adens`` for one Poisson iteration using batched polar quadrature.
@@ -96,6 +98,11 @@ def fill_density_harmonics_cupy(
     psi = psi_all[:n]
     psi_mid = psi_all[n : 2 * n]
     psi_3zd = psi_all[2 * n :]
+    disk_vertical_normalization = np.interp(
+        s_flat,
+        disk_vertical_norm_radii,
+        disk_vertical_norm_values,
+    )
 
     rho = total_density_harmonic_batch(
         s_flat,
@@ -109,6 +116,7 @@ def fill_density_harmonics_cupy(
         psic=cutoff_potential,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
+        disk_vertical_normalization=disk_vertical_normalization,
     ).reshape(radii.size, ntheta)
 
     cp = _cp

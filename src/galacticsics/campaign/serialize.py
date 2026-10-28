@@ -25,7 +25,15 @@ def model_to_dict(model: GalaxyModel) -> dict[str, Any]:
 def model_from_dict(data: dict[str, Any]) -> GalaxyModel:
     def _optional(cls, key: str):
         raw = data.get(key)
-        return None if raw is None else cls(**raw)
+        if raw is None:
+            return None
+        values = dict(raw)
+        # Model JSON written before the projected-column correction described
+        # the legacy midplane-normalized density law.  Preserve that meaning
+        # instead of silently changing old campaigns when they are reloaded.
+        if cls is ExponentialDisk and "vertical_density_mode" not in values:
+            values["vertical_density_mode"] = "legacy_midplane"
+        return cls(**values)
 
     return GalaxyModel(
         halo=_optional(NFWHalo, "halo"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import BinaryIO, TextIO, Union
@@ -206,6 +207,13 @@ def read_harmonic_potential(path: PathLike) -> HarmonicPotential:
         _, fr2_coeffs, next_idx = _read_data_block(lines, next_idx, nr, n_harm)
         fr2 = fr2_coeffs
 
+    vertical_density_mode = "legacy_midplane"
+    for line in lines:
+        content = _strip_comment(line)
+        if content.startswith("disk_vertical_density_mode="):
+            vertical_density_mode = content.split("=", 1)[1].strip()
+            break
+
     model = GalaxyModel(
         halo=NFWHalo(r_outer=chalo, v0=v0, a=a, enabled=bool(flags[4])),
         disk=ExponentialDisk(
@@ -217,6 +225,7 @@ def read_harmonic_potential(path: PathLike) -> HarmonicPotential:
             hole_radius=rhole,
             core_radius=rcore,
             enabled=bool(flags[0]),
+            vertical_density_mode=vertical_density_mode,
         ),
         disk2=Sech2Disk(
             mass=rmdisk2,
@@ -463,6 +472,17 @@ def write_harmonic_potential(potential: HarmonicPotential, path: PathLike) -> No
             sigma = disk_surface_density(r, m)
             lines.append(f"{r:16.8f}{sigma:16.8f}{0.0:16.8f}")
 
+    # Extension metadata belongs after every legacy positional block.  Older
+    # Fortran readers alternate label/data reads through the header and would
+    # be shifted by an extra comment line inserted there.
+    lines.extend(
+        [
+            "",
+            " # disk_vertical_density_mode="
+            f"{(d.vertical_density_mode if d else 'legacy_midplane')}",
+        ]
+    )
+
     Path(path).write_text("\n".join(lines) + "\n")
 
 
@@ -508,6 +528,18 @@ def cordbh_is_valid(path: PathLike, *, min_f_d: float = 0.1) -> bool:
     if corr.radius.size < 6:
         return False
     if not (np.all(np.isfinite(corr.f_d)) and np.all(np.isfinite(corr.f_sz))):
+        return False
+    # The Python solver clips failed correction updates to exactly 1e-3.
+    # A median-only check lets a broad collapsed band pass and yields
+    # needle-like, effectively unsampleable velocity DFs.
+    # Corrections can legitimately collapse only inside the exponentially
+    # negligible outer taper.  Ignore the final 20% of the tabulated support,
+    # but reject a clipped knot anywhere in the mass-carrying inner table.
+    core_stop = max(2, int(math.ceil(0.8 * corr.radius.size)))
+    if (
+        np.any(corr.f_d[1:core_stop] <= 1.001e-3)
+        or np.any(corr.f_sz[1:core_stop] <= 1.001e-3)
+    ):
         return False
     # Reject collapsed correction (disk DF would sample near-static orbits).
     if float(np.median(corr.f_d[1:])) < min_f_d:

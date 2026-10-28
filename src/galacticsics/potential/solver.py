@@ -63,7 +63,7 @@ def solve_potential(
     cleanup: bool = True,
     npsi: int = 1000,
     nint: int = 20,
-    max_iter: int = 100,
+    max_iter: int | None = None,
     n_workers: int | None = None,
     timeout: float | None = 3600.0,
     stream_output: bool = False,
@@ -91,6 +91,9 @@ def solve_potential(
         Energy grid size for DF tables. Default 1000.
     nint : int, optional
         Integration steps for DF tables. Default 20.
+    max_iter : int, optional
+        Poisson iteration cap. When omitted, the Python backend chooses a cap
+        suitable for the selected disk-density contract.
     n_workers : int, optional
         Thread pool size for radial shell integration (``0`` = serial).  Falls back
         to ``GALACTICSICS_SOLVE_WORKERS`` when omitted.

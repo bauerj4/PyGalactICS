@@ -10,7 +10,11 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 from galacticsics.io import read_harmonic_potential
-from galacticsics.io.formats import read_disk_correction, read_frequency_table
+from galacticsics.io.formats import (
+    cordbh_is_valid,
+    read_disk_correction,
+    read_frequency_table,
+)
 from galacticsics.potential.evaluate import evaluate_potential
 from galacticsics.sampling.particles import PARTICLE_DTYPE, ParticleSet
 from galacticsics.sampling.sampler import SampleConfig
@@ -116,19 +120,23 @@ def sample_disk_python(
         _RcircInterpolator,
         _disk_midplane_density,
         _diskdf5ez,
-        _find_fmax,
+        _find_fmax_and_velocity,
         _sigma_r2,
         _sigma_z2,
     )
-    from galacticsics.numerics import natural_cubic_spline
+    from galacticsics.numerics import bounded_linear_interpolator
 
     work_dir = Path(work_dir)
+    if not cordbh_is_valid(work_dir / "cordbh.dat"):
+        raise RuntimeError(
+            "invalid disk DF correction table; rerun diskdf before sampling"
+        )
     pot = read_harmonic_potential(work_dir / "dbh.dat")
     freq = read_frequency_table(work_dir / "freqdbh.dat")
     corr = read_disk_correction(work_dir / "cordbh.dat")
     rcirc_fn = _RcircInterpolator(pot, freq)
-    spline_d = natural_cubic_spline(corr.radius, corr.f_d)
-    spline_sz = natural_cubic_spline(corr.radius, corr.f_sz)
+    spline_d = bounded_linear_interpolator(corr.radius, corr.f_d)
+    spline_sz = bounded_linear_interpolator(corr.radius, corr.f_sz)
     disk = pot.model.disk
     assert disk is not None
     rng = _rng_from_legacy_seed(seed)
@@ -138,11 +146,14 @@ def sample_disk_python(
     mass = disk.mass / n_particles
     eps = 0.01
 
-    r_grid = np.linspace(0.0, rtrunc, 50)
-    rhoguess = np.exp(-r_grid / rd)
-    rhotst = np.array([_disk_midplane_density(float(r), 0.0, pot) / max(g, 1e-30) for r, g in zip(r_grid, rhoguess)])
-    rhomax = float(rhotst.max()) * 1.2
-    rhomin = 1e-10 * rhomax
+    from galacticsics.sampling.disk_envelope import disk_rejection_envelope
+
+    rhomax, rhomin = disk_rejection_envelope(
+        pot,
+        radial_limit=rtrunc,
+        proposal_scale_length=rd,
+        proposal_scale_height=zd,
+    )
     attempt_limit = max_attempts if max_attempts is not None else max(500_000, 15 * n_particles)
 
     parts: list[tuple] = []
@@ -158,6 +169,12 @@ def sample_disk_python(
             z_try = zd * math.atanh(max(min(v1, 0.999), -0.999))
         rhoguess = math.exp(-r_try / rd) / math.cosh(z_try / zd) ** 2
         rhotst = _disk_midplane_density(r_try, z_try, pot) / max(rhoguess, 1e-30)
+        if rhotst > rhomax * (1.0 + 1.0e-10):
+            raise RuntimeError(
+                "disk rejection envelope exceeded: "
+                f"rhotst={rhotst:.8g} > rhomax={rhomax:.8g} at "
+                f"R={r_try:.8g}, z={z_try:.8g}"
+            )
         if rhotst < rhomin or (rhomax - rhomin) * rng.random() > rhotst:
             continue
 
@@ -167,31 +184,53 @@ def sample_disk_python(
         omega = freq.omega(r_try)
         kappa = freq.kappa(r_try)
         vphimax = omega * r_try
-        f_d = corr.f_d_at(r_try)
         f_sz = corr.f_sz_at(r_try)
-        vsigR = math.sqrt(_sigma_r2(r_try, pot.model, f_d))
+        vsigR = math.sqrt(_sigma_r2(r_try, pot.model))
         vsigp = kappa / (2 * omega) * vsigR if omega > 0 else 0.0
         vsigz = math.sqrt(_sigma_z2(r_try, pot, disk.scale_height, f_sz))
-        fmax = 1.1 * _find_fmax(vphimax, r_try, z_try, pot, freq, rcirc_fn, spline_d, spline_sz, vsigp)
+        raw_fmax, vphi_mode = _find_fmax_and_velocity(
+            vphimax,
+            r_try,
+            z_try,
+            pot,
+            freq,
+            rcirc_fn,
+            spline_d,
+            spline_sz,
+            vsigp,
+        )
+        fmax = 2.0 * raw_fmax
         if fmax <= 0.0:
-            continue
+            raise RuntimeError(
+                "disk velocity envelope is non-positive at "
+                f"R={r_try:.8g}, z={z_try:.8g}"
+            )
 
         accepted = False
-        for _ in range(200):
+        for _ in range(20_000):
             gr = 8 * (rng.random() - 0.5)
             gp = 16 * (rng.random() - 0.5)
             gz = 8 * (rng.random() - 0.5)
             if gr * gr / 16 + gp * gp / 64 + gz * gz / 16 > 1:
                 continue
             vR = vsigR * gr
-            vp = vphimax + vsigp * gp
+            vp = vphi_mode + vsigp * gp
             vz = vsigz * gz
             f0 = _diskdf5ez(vR, vp, vz, r_try, z_try, pot, freq, rcirc_fn, spline_d, spline_sz)
+            if f0 > fmax * (1.0 + 1.0e-10):
+                raise RuntimeError(
+                    "disk velocity rejection envelope exceeded: "
+                    f"f={f0:.8g} > fmax={fmax:.8g} at "
+                    f"R={r_try:.8g}, z={z_try:.8g}"
+                )
             if fmax * rng.random() <= f0:
                 accepted = True
                 break
         if not accepted:
-            continue
+            raise RuntimeError(
+                "disk velocity sampling failed after 20000 attempts at "
+                f"R={r_try:.8g}, z={z_try:.8g}"
+            )
         # Cylindrical (vR, vφ, vz) → Cartesian (vx, vy, vz); matches OpenMP/halo.
         if r_try > 0.0:
             cph = x / r_try

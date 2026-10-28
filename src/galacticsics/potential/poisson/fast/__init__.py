@@ -80,6 +80,8 @@ def _fill_density_harmonics_python(
     n_workers: int,
     halo_psi_tables,
     bulge_psi_tables,
+    disk_vertical_norm_radii,
+    disk_vertical_norm_values,
 ) -> None:
     active_ells = list(range(0, active_lmax + 1, 2))
     shell_indices = list(range(1, n_radial_shells + 1))
@@ -97,6 +99,8 @@ def _fill_density_harmonics_python(
             psic=cutoff_potential,
             halo_psi_tables=halo_psi_tables,
             bulge_psi_tables=bulge_psi_tables,
+            disk_vertical_norm_radii=disk_vertical_norm_radii,
+            disk_vertical_norm_values=disk_vertical_norm_values,
         )
         return shell_index, moments
 
@@ -119,6 +123,8 @@ def _pack_poisson_context(
     cutoff_potential: float,
     halo_psi_tables,
     bulge_psi_tables,
+    disk_vertical_norm_radii,
+    disk_vertical_norm_values,
 ) -> dict:
     disk = model.disk
     pack: dict = {
@@ -141,6 +147,12 @@ def _pack_poisson_context(
                 "disk_trunc_width": float(disk.trunc_width),
                 "disk_hole_radius": float(disk.hole_radius),
                 "disk_core_radius": float(disk.core_radius),
+                "disk_vertical_norm_radii": np.ascontiguousarray(
+                    disk_vertical_norm_radii, dtype=np.float64
+                ),
+                "disk_vertical_norm_values": np.ascontiguousarray(
+                    disk_vertical_norm_values, dtype=np.float64
+                ),
             }
         )
     if halo_psi_tables is not None:
@@ -184,6 +196,8 @@ def fill_density_harmonics(
     halo_psi_tables,
     bulge_psi_tables,
     n_threads: int | None = None,
+    disk_vertical_norm_radii: np.ndarray | None = None,
+    disk_vertical_norm_values: np.ndarray | None = None,
 ) -> None:
     """
     Fill ``adens`` for one Poisson iteration using the fastest available backend.
@@ -193,6 +207,21 @@ def fill_density_harmonics(
     2. OpenMP C when ``GALACTICSICS_POISSON_THREADS>0``
     3. Python (± thread pool)
     """
+    if model.disk and model.disk.enabled and (
+        disk_vertical_norm_radii is None or disk_vertical_norm_values is None
+    ):
+        from galacticsics.potential.poisson.disk_vertical import (
+            disk_vertical_normalization_table,
+        )
+
+        disk_vertical_norm_radii, disk_vertical_norm_values = (
+            disk_vertical_normalization_table(arrays, model)
+        )
+    if disk_vertical_norm_radii is None:
+        disk_vertical_norm_radii = np.array([0.0], dtype=float)
+    if disk_vertical_norm_values is None:
+        disk_vertical_norm_values = np.array([0.0], dtype=float)
+
     use_gpu = (
         _poisson_gpu is not None
         and _poisson_gpu.gpu_requested()
@@ -213,6 +242,8 @@ def fill_density_harmonics(
             cutoff_potential=float(cutoff_potential),
             halo_psi_tables=halo_psi_tables,
             bulge_psi_tables=bulge_psi_tables,
+            disk_vertical_norm_radii=disk_vertical_norm_radii,
+            disk_vertical_norm_values=disk_vertical_norm_values,
         )
         return
 
@@ -230,6 +261,8 @@ def fill_density_harmonics(
             cutoff_potential=cutoff_potential,
             halo_psi_tables=halo_psi_tables,
             bulge_psi_tables=bulge_psi_tables,
+            disk_vertical_norm_radii=disk_vertical_norm_radii,
+            disk_vertical_norm_values=disk_vertical_norm_values,
         )
         _poisson_c.fill_polar_density_harmonics(
             density_harmonics,
@@ -255,4 +288,6 @@ def fill_density_harmonics(
         n_workers=n_workers,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
+        disk_vertical_norm_radii=disk_vertical_norm_radii,
+        disk_vertical_norm_values=disk_vertical_norm_values,
     )

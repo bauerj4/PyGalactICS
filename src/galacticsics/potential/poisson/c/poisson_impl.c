@@ -156,7 +156,7 @@ static double approx_disk_density(const PoissonPack *pack, double s, double z) {
 }
 
 static double disk_surface_sigma(const PoissonPack *pack, double r) {
-    if (!pack->has_disk || r <= 0.0) {
+    if (!pack->has_disk || r < 0.0) {
         return 0.0;
     }
     double eerfc, eexp;
@@ -189,8 +189,14 @@ static double disk_density_psi(
             con = pow(0.009866, coeff);
         }
     }
-    double surface = disk_surface_sigma(pack, hypot(s, z));
-    return 0.5 / pack->disk_zd * surface * con;
+    double surface = disk_surface_sigma(pack, s);
+    double vertical_norm = interp1d(
+        pack->disk_vertical_norm_radii,
+        pack->disk_vertical_norm_values,
+        pack->n_disk_vertical_norm,
+        s
+    );
+    return vertical_norm * surface * con;
 }
 
 static double halo_density_psi(const PoissonPack *pack, double psi) {

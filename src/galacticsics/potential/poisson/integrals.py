@@ -67,6 +67,8 @@ def _rho_on_polar_shell(
     psic: float,
     halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None,
     bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None,
+    disk_vertical_norm_radii: np.ndarray | None = None,
+    disk_vertical_norm_values: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate total harmonic density on polar nodes for one cylindrical shell."""
     from galacticsics.potential.poisson.densities import total_density_harmonic_batch
@@ -81,6 +83,22 @@ def _rho_on_polar_shell(
     psi = psi_all[:n]
     psi_mid = psi_all[n : 2 * n]
     psi_3zd = psi_all[2 * n :]
+    disk_vertical_normalization = None
+    if model.disk and model.disk.enabled:
+        from galacticsics.potential.poisson.disk_vertical import (
+            disk_vertical_normalization_table,
+            interpolate_disk_vertical_normalization,
+        )
+
+        if disk_vertical_norm_radii is None or disk_vertical_norm_values is None:
+            disk_vertical_norm_radii, disk_vertical_norm_values = (
+                disk_vertical_normalization_table(arrays, model)
+            )
+        disk_vertical_normalization = interpolate_disk_vertical_normalization(
+            s,
+            disk_vertical_norm_radii,
+            disk_vertical_norm_values,
+        )
     rho = total_density_harmonic_batch(
         s,
         z,
@@ -93,6 +111,7 @@ def _rho_on_polar_shell(
         psic=psic,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
+        disk_vertical_normalization=disk_vertical_normalization,
     )
     return ctheta, rho
 
@@ -109,6 +128,8 @@ def integrate_polar_harmonics_at_shell(
     psic: float,
     halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None = None,
     bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None = None,
+    disk_vertical_norm_radii: np.ndarray | None = None,
+    disk_vertical_norm_values: np.ndarray | None = None,
 ) -> dict[int, float]:
     """
     Synthesize all requested density harmonics at one shell radius.
@@ -128,6 +149,8 @@ def integrate_polar_harmonics_at_shell(
         psic=psic,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
+        disk_vertical_norm_radii=disk_vertical_norm_radii,
+        disk_vertical_norm_values=disk_vertical_norm_values,
     )
     moments: dict[int, float] = {}
     for ell in ells:
@@ -158,6 +181,8 @@ def integrate_polar_density_at_shell(
     psic: float,
     halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None = None,
     bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None = None,
+    disk_vertical_norm_radii: np.ndarray | None = None,
+    disk_vertical_norm_values: np.ndarray | None = None,
 ) -> float:
     """
     Synthesize one density harmonic at cylindrical radius ``r``.
@@ -205,6 +230,8 @@ def integrate_polar_density_at_shell(
         psic=psic,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
+        disk_vertical_norm_radii=disk_vertical_norm_radii,
+        disk_vertical_norm_values=disk_vertical_norm_values,
     )[ell]
 
 

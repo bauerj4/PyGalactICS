@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 from scipy import integrate
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, interp1d
 from scipy.optimize import minimize_scalar
 from scipy.special import eval_legendre
 
@@ -33,6 +33,24 @@ def natural_cubic_spline(x: np.ndarray, y: np.ndarray) -> CubicSpline:
     if len(x) < 2:
         raise ValueError("need at least two points for a spline")
     return CubicSpline(x, y, bc_type="natural")
+
+
+def bounded_linear_interpolator(x: np.ndarray, y: np.ndarray):
+    """Linear interpolation clamped to endpoint values outside the table."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if x.ndim != 1 or y.ndim != 1 or x.shape != y.shape:
+        raise ValueError("x and y must be 1-D arrays of equal length")
+    if len(x) < 2:
+        raise ValueError("need at least two points for interpolation")
+    return interp1d(
+        x,
+        y,
+        kind="linear",
+        bounds_error=False,
+        fill_value=(float(y[0]), float(y[-1])),
+        assume_sorted=True,
+    )
 
 
 def legendre_even_l(costheta: float, lmax: int) -> tuple[np.ndarray, np.ndarray]:

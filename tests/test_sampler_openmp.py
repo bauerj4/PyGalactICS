@@ -29,14 +29,50 @@ pytestmark = [
 ]
 
 
-def _small_work_dir(tmp_path: Path) -> Path:
+@pytest.fixture(scope="module")
+def small_work_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     from galacticsics.distribution.diskdf_solve import solve_diskdf_python
+    from galacticsics.models import NFWHalo, SersicBulge
 
-    model = replace(GalaxyModel.reference_disk_halo(), grid=PotentialGrid(dr=0.15, nr=60, lmax=2))
-    work = tmp_path / "omp_sampler"
-    work.mkdir()
-    solve_potential(model, work_dir=work, cleanup=False)
-    solve_diskdf_python(model, work, n_iterations=1, n_radial_steps=12)
+    base = GalaxyModel.reference_disk_halo()
+    assert base.disk is not None
+    model = replace(
+        base,
+        disk=replace(
+            base.disk,
+            mass=6.0,
+            scale_length=2.0,
+            outer_radius=8.0,
+            trunc_width=1.0,
+            vertical_density_mode="surface_normalized",
+        ),
+        halo=NFWHalo(
+            r_outer=40.0,
+            v0=3.2,
+            a=25.0,
+            dr_trunc=6.0,
+            enabled=True,
+        ),
+        bulge=SersicBulge(
+            n_sersic=4.0,
+            ppp=0.5,
+            v0=1.5,
+            a=0.4,
+            enabled=True,
+        ),
+        grid=PotentialGrid(dr=0.05, nr=800, lmax=2),
+    )
+    work = tmp_path_factory.mktemp("omp_sampler")
+    solve_potential(
+        model,
+        work_dir=work,
+        cleanup=False,
+        npsi=256,
+        nint=12,
+        n_workers=0,
+        backend="python",
+    )
+    solve_diskdf_python(model, work, n_iterations=10, n_radial_steps=50)
     return work
 
 
@@ -55,8 +91,8 @@ def _bulge_halo_work_dir(tmp_path: Path) -> Path:
 
 
 @pytest.mark.essential
-def test_openmp_halo_matches_python(tmp_path: Path) -> None:
-    work = _small_work_dir(tmp_path)
+def test_openmp_halo_matches_python(small_work_dir: Path) -> None:
+    work = small_work_dir
     cfg = SampleConfig(n_halo=200, use_openmp=False)
     py = sample_halo_python(work, n_particles=200, seed=-7, center=True, config=cfg)
     omp = sample_halo_openmp(work, n_particles=200, seed=-7, center=True)
@@ -65,16 +101,16 @@ def test_openmp_halo_matches_python(tmp_path: Path) -> None:
 
 
 @pytest.mark.essential
-def test_openmp_disk_produces_particles(tmp_path: Path) -> None:
-    work = _small_work_dir(tmp_path)
+def test_openmp_disk_produces_particles(small_work_dir: Path) -> None:
+    work = small_work_dir
     ps = sample_disk_openmp(work, n_particles=100, seed=-3, center=True)
     assert len(ps) == 100
     assert ps.total_mass > 0
 
 
 @pytest.mark.slow
-def test_openmp_disk_faster_than_python(tmp_path: Path) -> None:
-    work = _small_work_dir(tmp_path)
+def test_openmp_disk_faster_than_python(small_work_dir: Path) -> None:
+    work = small_work_dir
     n = 500
     cfg = SampleConfig(use_openmp=False)
     t0 = time.perf_counter()
@@ -123,11 +159,11 @@ def test_openmp_disk_velocity_stats_mw_coarse(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
-def test_openmp_disk_velocity_stats_match_python(tmp_path: Path) -> None:
+def test_openmp_disk_velocity_stats_match_python(small_work_dir: Path) -> None:
     """OpenMP gendisk should not hot-tail after rcirc(am) parity fix."""
     import numpy as np
 
-    work = _small_work_dir(tmp_path)
+    work = small_work_dir
     n = 400
     seed = -42
     py = sample_disk_python(work, n_particles=n, seed=seed, config=SampleConfig(use_openmp=False))
@@ -138,6 +174,31 @@ def test_openmp_disk_velocity_stats_match_python(tmp_path: Path) -> None:
     assert omp_speeds.max() / np.median(omp_speeds) < 5.5
     assert np.median(omp_speeds) == pytest.approx(np.median(py_speeds), rel=0.15)
     assert np.percentile(omp_speeds, 99) == pytest.approx(np.percentile(py_speeds, 99), rel=0.25)
+
+
+@pytest.mark.physics_python
+def test_openmp_frequency_pack_matches_python_beyond_table(
+    small_work_dir: Path,
+) -> None:
+    """High-Lz proposals use the same endpoint policy in both samplers."""
+    import numpy as np
+
+    from galacticsics.io import read_frequency_table
+    from galacticsics.sampling.openmp.pack import pack_disk_context
+
+    frequency = read_frequency_table(small_work_dir / "freqdbh.dat")
+    context = pack_disk_context(small_work_dir)
+    outside = 4.0 * float(frequency.radius[-1])
+
+    # np.interp has the same endpoint-clamping policy as the C sampler.
+    packed_omega = float(
+        np.interp(outside, context["freq_radius"], context["freq_omega"])
+    )
+    packed_kappa = float(
+        np.interp(outside, context["freq_radius"], context["freq_kappa"])
+    )
+    assert frequency.omega(outside) == pytest.approx(packed_omega, rel=1.0e-12)
+    assert frequency.kappa(outside) == pytest.approx(packed_kappa, rel=1.0e-12)
 
 
 def _mean_v_phi(data) -> float:
@@ -174,11 +235,11 @@ def test_cylindrical_to_cartesian_velocity_roundtrip() -> None:
 
 @pytest.mark.physics_python
 @pytest.mark.essential
-def test_disk_sampler_writes_cartesian_rotation(tmp_path: Path) -> None:
+def test_disk_sampler_writes_cartesian_rotation(small_work_dir: Path) -> None:
     """Regression: gendisk must convert (vR, vφ) → (vx, vy), not store cylindrical as Cartesian."""
     import numpy as np
 
-    work = _small_work_dir(tmp_path)
+    work = small_work_dir
     n = 800
     seed = 7
     py = sample_disk_python(work, n_particles=n, seed=seed, config=SampleConfig(use_openmp=False))
@@ -194,7 +255,7 @@ def test_disk_sampler_writes_cartesian_rotation(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
-def test_disk_sampler_radial_jacobian_invu(tmp_path: Path) -> None:
+def test_disk_sampler_radial_jacobian_invu(small_work_dir: Path) -> None:
     """Regression: R proposal must use legacy invu (P∝R e^{-R/rd}), not -rd ln u."""
     import numpy as np
 
@@ -205,10 +266,11 @@ def test_disk_sampler_radial_jacobian_invu(tmp_path: Path) -> None:
     xs = np.array([_invu(-u) for u in np.linspace(1e-6, 1 - 1e-6, 2000)])
     assert 1.4 < float(np.median(xs)) < 2.0
 
-    work = _small_work_dir(tmp_path)
+    work = small_work_dir
     py = sample_disk_python(work, n_particles=2000, seed=3, config=SampleConfig(use_openmp=False))
     r = np.hypot(py.data["x"], py.data["y"])
-    # Wrong -rd*ln(u) proposal piles up at R_med ≲ 2 for Rd~3; invu gives ~4+.
+    # Wrong -rd*ln(u) proposal piles up near R_med=Rd*ln(2); invu includes
+    # the cylindrical Jacobian and gives a substantially larger median.
     assert float(np.median(r)) > 2.5
     if extension_available():
         omp = sample_disk_openmp(work, n_particles=2000, seed=3, n_threads=1)

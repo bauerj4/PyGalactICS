@@ -28,6 +28,9 @@ typedef struct {
     double disk_trunc_width;
     double disk_hole_radius;
     double disk_core_radius;
+    int n_disk_vertical_norm;
+    const double *disk_vertical_norm_radii;
+    const double *disk_vertical_norm_values;
 
     int npsi_halo;
     const double *halo_energies;

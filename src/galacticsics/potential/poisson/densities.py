@@ -52,9 +52,9 @@ def _truncated_exponential(
     trunc_width: float,
 ) -> float:
     """Exponentially declining surface density with complementary error-function truncation."""
-    if r <= 0.0:
+    if r < 0.0:
         return 0.0
-    t = (r - outer_radius) / trunc_width
+    t = math.sqrt(0.5) * (r - outer_radius) / trunc_width
     if t < -4.0:
         trunc = 1.0
     elif t > 4.0:
@@ -223,7 +223,7 @@ def halo_density_spherical_array(r: np.ndarray, halo: NFWHalo) -> np.ndarray:
 
 def disk_surface_density(r: float, model: GalaxyModel) -> float:
     """
-    Midplane stellar disk surface density ``Sigma(R)``.
+    Projected stellar disk surface density ``Sigma(R)``.
 
     Parameters
     ----------
@@ -252,7 +252,7 @@ def disk_surface_density(r: float, model: GalaxyModel) -> float:
 
 def disk_surface_density_array(r: np.ndarray, model: GalaxyModel) -> np.ndarray:
     """
-    Vectorized midplane stellar disk surface density ``Sigma(R)``.
+    Vectorized projected stellar disk surface density ``Sigma(R)``.
 
     Parameters
     ----------
@@ -272,17 +272,17 @@ def disk_surface_density_array(r: np.ndarray, model: GalaxyModel) -> np.ndarray:
         return np.zeros_like(radii, dtype=float)
     sigma0 = disk.mass / (2.0 * math.pi * disk.scale_length**2)
     sigma = np.zeros_like(radii, dtype=float)
-    positive = radii > 0.0
-    if not np.any(positive):
+    nonnegative = radii >= 0.0
+    if not np.any(nonnegative):
         return sigma
-    rp = radii[positive]
-    t = (rp - disk.outer_radius) / disk.trunc_width
+    rp = radii[nonnegative]
+    t = math.sqrt(0.5) * (rp - disk.outer_radius) / disk.trunc_width
     trunc = np.zeros_like(rp)
     trunc[t < -4.0] = 1.0
     mid = (t >= -4.0) & (t <= 4.0)
     if np.any(mid):
         trunc[mid] = 0.5 * erfc(t[mid])
-    sigma[positive] = sigma0 * np.exp(-rp / disk.scale_length) * trunc
+    sigma[nonnegative] = sigma0 * np.exp(-rp / disk.scale_length) * trunc
     return sigma
 
 
@@ -293,6 +293,8 @@ def disk_density_psi_batch(
     psi_mid: np.ndarray,
     psi_at_3zd: np.ndarray,
     model: GalaxyModel,
+    *,
+    vertical_normalization: np.ndarray | float | None = None,
 ) -> np.ndarray:
     """
     Vectorized disk density from the potential-based vertical profile (``diskdens``).
@@ -339,8 +341,17 @@ def disk_density_psi_batch(
         valid = (coeff_off <= 16.0) & (coeff_off >= 0.0)
         con_off[valid] = 0.009866**coeff_off[valid]
         con[off] = con_off
-    surface = disk_surface_density_array(np.hypot(s_arr[active], z_arr[active]), model)
-    rho[active] = 0.5 / zdisk * surface * con
+    if vertical_normalization is None:
+        if disk.vertical_density_mode != "legacy_midplane":
+            raise ValueError(
+                "surface_normalized disk density requires vertical_normalization"
+            )
+        norm_active = np.full_like(con, 0.5 / zdisk)
+    else:
+        norm = np.broadcast_to(np.asarray(vertical_normalization, dtype=float), s_arr.shape)
+        norm_active = norm[active]
+    surface = disk_surface_density_array(s_arr[active], model)
+    rho[active] = norm_active * surface * con
     return rho
 
 
@@ -417,6 +428,8 @@ def disk_density_psi(
     psi_mid: float,
     psi_at_3zd: float,
     model: GalaxyModel,
+    *,
+    vertical_normalization: float | None = None,
 ) -> float:
     """
     Disk density from the potential-based vertical profile (``diskdens``).
@@ -451,8 +464,14 @@ def disk_density_psi(
             con = 0.0
         else:
             con = 0.009866**coeff
-    f = disk_surface_density(math.hypot(s, z), model)
-    return 0.5 / zdisk * f * con
+    if vertical_normalization is None:
+        if disk.vertical_density_mode != "legacy_midplane":
+            raise ValueError(
+                "surface_normalized disk density requires vertical_normalization"
+            )
+        vertical_normalization = 0.5 / zdisk
+    f = disk_surface_density(s, model)
+    return float(vertical_normalization) * f * con
 
 
 def bulge_density_psi(
@@ -553,6 +572,7 @@ def total_density_harmonic_batch(
     psic: float,
     halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None = None,
     bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None = None,
+    disk_vertical_normalization: np.ndarray | float | None = None,
 ) -> np.ndarray:
     """
     Vectorized :func:`total_density_harmonic` for polar quadrature nodes.
@@ -616,7 +636,13 @@ def total_density_harmonic_batch(
                 rho[idx] += float(dens_psi_bulge(float(psi_arr[idx])))
     if model.disk and model.disk.enabled:
         rho += disk_density_psi_batch(
-            s_arr, z_arr, psi_arr, psi_mid_arr, psi_3zd_arr, model
+            s_arr,
+            z_arr,
+            psi_arr,
+            psi_mid_arr,
+            psi_3zd_arr,
+            model,
+            vertical_normalization=disk_vertical_normalization,
         )
         from galacticsics.potential.poisson.appdisk import approximate_disk_density_batch
 
@@ -635,6 +661,7 @@ def total_density_harmonic(
     dens_psi_halo: Callable[[float], float] | None,
     dens_psi_bulge: Callable[[float], float] | None,
     psic: float,
+    disk_vertical_normalization: float | None = None,
 ) -> float:
     """
     Total density for harmonic synthesis (``totdens - appdisk``).
@@ -663,7 +690,15 @@ def total_density_harmonic(
     if model.bulge and model.bulge.enabled and dens_psi_bulge is not None and psi >= psic:
         rho += float(dens_psi_bulge(psi))
     if model.disk and model.disk.enabled:
-        rho += disk_density_psi(s, z, psi, psi_mid, psi_at_3zd, model)
+        rho += disk_density_psi(
+            s,
+            z,
+            psi,
+            psi_mid,
+            psi_at_3zd,
+            model,
+            vertical_normalization=disk_vertical_normalization,
+        )
     rho -= disk_density_estimate(s, z, model)
     return max(rho, 0.0)
 
