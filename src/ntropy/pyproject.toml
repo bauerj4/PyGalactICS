@@ -38,3 +38,7 @@ where = ["."]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "slow: long-running performance or integration tests",
+    "benchmark: optional performance timing",
+]

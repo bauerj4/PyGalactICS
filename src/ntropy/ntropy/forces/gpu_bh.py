@@ -232,12 +232,42 @@ def _log_timer(label: str, t0: float, msg: str = "") -> None:
 # GPU BH kernel — tree walk per target
 # ------------------------------------------------------------------ #
 
-# Single module containing BOTH kernels — prevents CuPy/Blackwell multi-module corruption.
+# One module contains unpack plus every walk-stack specialization, preventing
+# the CuPy/Blackwell allocator corruption seen with multiple RawModules.
 #
 # CRITICAL: tid = blockIdx.x * blockDim.x + threadIdx.x  (global thread index).
 # An earlier version used only threadIdx.x, which silently ignored all blocks
 # beyond the first and forced a catastrophic 256-target chunking workaround.
-_COMBINED_KERNEL_SRC = r"""
+_WALK_STACK_CAPACITIES = (64, 128, 256, 512)
+_DEFAULT_WALK_STACK_CAPACITY = 256
+_WALK_STACK_DEPTH_SAFETY_FACTOR = 4
+
+
+def _select_bh_walk_stack_capacity(n_particles: int) -> int:
+    """Choose an O(log N) per-target walk stack from compiled capacity tiers.
+
+    A balanced octree has ``ceil(log_8(N))`` levels and can leave at most
+    seven siblings pending per level.  Multiplying that depth by four leaves
+    room for the concentrated trees seen in galaxy models.  The overflow flag
+    remains authoritative for still-more-pathological trees.
+    """
+    n = int(n_particles)
+    if n < 1:
+        raise ValueError("n_particles must be positive")
+    ceil_log2 = (n - 1).bit_length()
+    balanced_levels = max(1, (ceil_log2 + 2) // 3)
+    required = (
+        7
+        * (balanced_levels + 1)
+        * _WALK_STACK_DEPTH_SAFETY_FACTOR
+    )
+    for capacity in _WALK_STACK_CAPACITIES:
+        if required <= capacity:
+            return capacity
+    return _WALK_STACK_CAPACITIES[-1]
+
+
+_KERNEL_SRC_TEMPLATE = r"""
 typedef unsigned char uchar;
 
 extern "C" __global__ void bh_unpack_kernel(
@@ -278,7 +308,7 @@ extern "C" __global__ void bh_unpack_kernel(
     out_lc[i] = (int)nodes_flat[row+18];
 }
 
-extern "C" __global__ void bh_walk_kernel(
+extern "C" __global__ void bh_walk_kernel_STACK_CAPACITY(
     // Packed tree nodes (SoA layout) — geometric centers unused in walk:
     const double *__restrict__ n_mx,   // [n_nodes] com x
     const double *__restrict__ n_my,   // [n_nodes] com y
@@ -300,7 +330,8 @@ extern "C" __global__ void bh_walk_kernel(
     const int       n,
     const int       leaf_direct,     // 1 => n_ls is a direct particle index
     const double    theta_sq,
-    double         * __restrict__ acc) // [n_targets*3]
+    double         * __restrict__ acc, // [n_targets*3]
+    int            * __restrict__ walk_overflow) // single device flag
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_targets) return;
@@ -321,10 +352,9 @@ extern "C" __global__ void bh_walk_kernel(
 
     double ax = 0.0, ay = 0.0, az = 0.0;
 
-    // Iterative tree walk (avoids deep recursion on GPU).
-    // Depth of a balanced octree for 1e8 particles is ~9; 64 covers
-    // severely unbalanced cases without blowing local memory.
-    int node_stack[64];
+    // Iterative tree walk (avoids deep recursion on GPU).  STACK_CAPACITY is
+    // selected from total source-particle count before launch.
+    int node_stack[STACK_CAPACITY];
     int stack_top = 0;
     node_stack[stack_top++] = 0;  // root
 
@@ -394,7 +424,12 @@ extern "C" __global__ void bh_walk_kernel(
                 #pragma unroll
                 for (int c = 7; c >= 0; --c) {
                     const int child = n_ch[base + c];
-                    if (child > 0 && child < n_nodes && stack_top < 64) {
+                    if (child > 0 && child < n_nodes) {
+                        if (stack_top >= STACK_CAPACITY) {
+                            // Never return a plausible-looking partial force.
+                            atomicExch(walk_overflow, 1);
+                            return;
+                        }
                         node_stack[stack_top++] = child;
                     }
                 }
@@ -408,6 +443,18 @@ extern "C" __global__ void bh_walk_kernel(
 }
 """
 
+_WALK_KERNEL_MARKER = (
+    'extern "C" __global__ void bh_walk_kernel_STACK_CAPACITY('
+)
+_UNPACK_KERNEL_SRC, _walk_kernel_tail = _KERNEL_SRC_TEMPLATE.split(
+    _WALK_KERNEL_MARKER, 1
+)
+_WALK_KERNEL_TEMPLATE = _WALK_KERNEL_MARKER + _walk_kernel_tail
+_COMBINED_KERNEL_SRC = _UNPACK_KERNEL_SRC + "\n".join(
+    _WALK_KERNEL_TEMPLATE.replace("STACK_CAPACITY", str(capacity))
+    for capacity in _WALK_STACK_CAPACITIES
+)
+
 # ------------------------------------------------------------------ #
 # Compiled kernel cache — PRE-COMPILED at module import to avoid
 # secondary RawModule compilation on Blackwell (sm_120), which corrupts
@@ -416,32 +463,44 @@ extern "C" __global__ void bh_walk_kernel(
 
 _bh_kernel_cache: dict[str, Any] | None = None
 
+
+def _kernel_cache_from_module(module: Any) -> dict[str, Any]:
+    return {
+        "walks": {
+            capacity: module.get_function(f"bh_walk_kernel_{capacity}")
+            for capacity in _WALK_STACK_CAPACITIES
+        },
+        "unpack": module.get_function("bh_unpack_kernel"),
+        # Keep the module alive to prevent CUDA_ERROR_ILLEGAL_ADDRESS on unload.
+        "_mod": module,
+    }
+
 if _cp is not None and _cuda_context_established:
     try:
-        # Compile BOTH kernels NOW at import — before any bhtree_c cuBLAS load.
+        # Compile all walk tiers plus unpack NOW, before any bhtree_c cuBLAS load.
         _bh_init_mod = _cp.RawModule(code=_COMBINED_KERNEL_SRC)
-        _bh_kernel_cache = {
-            "walk": _bh_init_mod.get_function("bh_walk_kernel"),
-            "unpack": _bh_init_mod.get_function("bh_unpack_kernel"),
-            # Keep module alive — prevents CUDA_ERROR_ILLEGAL_ADDRESS on module unload
-            "_mod": _bh_init_mod,
-        }
+        _bh_kernel_cache = _kernel_cache_from_module(_bh_init_mod)
         del _bh_init_mod  # reference kept in cache to prevent GC crash
     except Exception:
         _bh_kernel_cache = None
 
 
-def _ensure_bh_kernels(cp: Any) -> tuple[Any, Any]:
-    """Compile (once) and return (walk, unpack) kernels."""
+def _ensure_bh_kernels(
+    cp: Any,
+    *,
+    n_particles: int | None = None,
+) -> tuple[Any, Any]:
+    """Compile once and return the particle-count-tiered walk plus unpack."""
     global _bh_kernel_cache
     if _bh_kernel_cache is None:
         mod = cp.RawModule(code=_COMBINED_KERNEL_SRC)
-        _bh_kernel_cache = {
-            "walk": mod.get_function("bh_walk_kernel"),
-            "unpack": mod.get_function("bh_unpack_kernel"),
-            "_mod": mod,
-        }
-    return _bh_kernel_cache["walk"], _bh_kernel_cache["unpack"]
+        _bh_kernel_cache = _kernel_cache_from_module(mod)
+    capacity = (
+        _DEFAULT_WALK_STACK_CAPACITY
+        if n_particles is None
+        else _select_bh_walk_stack_capacity(n_particles)
+    )
+    return _bh_kernel_cache["walks"][capacity], _bh_kernel_cache["unpack"]
 
 
 def _get_bh_kernels() -> tuple[Any, Any]:
@@ -499,6 +558,8 @@ class GpuBhState:
     d_ch: Any | None = None
     d_ls: Any | None = None
     d_lc: Any | None = None
+    d_walk_overflow: Any | None = None
+    walk_stack_capacity: int = 0
     leaf_direct: int = 0
 
     def build_on_gpu(self) -> None:
@@ -544,7 +605,8 @@ class GpuBhState:
         """Free GPU memory."""
         for attr in ("d_nodes_flat", "d_leaf_indices",
                       "d_cx", "d_cy", "d_cz", "d_mx", "d_my", "d_mz",
-                      "d_sz", "d_ms", "d_il", "d_ch", "d_ls", "d_lc"):
+                      "d_sz", "d_ms", "d_il", "d_ch", "d_ls", "d_lc",
+                      "d_walk_overflow"):
             setattr(self, attr, None)
 
     def is_ready(self) -> bool:
@@ -557,6 +619,22 @@ class GpuBhState:
 # ------------------------------------------------------------------ #
 
 _BLOCK_SIZE = 256  # threads per block for BH walk kernel
+
+
+def _raise_if_bh_walk_overflow(cp: Any, state: GpuBhState) -> None:
+    """Reject partial forces when any target exhausts the device walk stack."""
+    if (
+        state.d_walk_overflow is not None
+        and int(cp.asnumpy(state.d_walk_overflow)[0]) != 0
+    ):
+        capacity = state.walk_stack_capacity
+        raise RuntimeError(
+            f"GPU Barnes-Hut tree walk exceeded its "
+            f"{capacity}-entry traversal stack for "
+            f"{state.n_particles} source particles; refusing to "
+            "return incomplete forces. Use the CPU Barnes-Hut backend for "
+            "this unusually deep tree."
+        )
 
 
 def _launch_bh_walk(
@@ -575,6 +653,8 @@ def _launch_bh_walk(
     d_acc: Any,
 ) -> None:
     """Launch a single multi-block BH tree-walk covering all targets."""
+    state.n_particles = n
+    state.walk_stack_capacity = _select_bh_walk_stack_capacity(n)
     theta_sq = float(theta) * float(theta)
     block = min(_BLOCK_SIZE, max(n_targets, 1))
     grid = (int((n_targets + block - 1) // block), 1, 1)
@@ -584,6 +664,11 @@ def _launch_bh_walk(
     d_leaf = state.d_leaf_indices
     if d_leaf is None:
         d_leaf = cp.zeros(1, dtype=cp.int32)
+
+    if state.d_walk_overflow is None:
+        state.d_walk_overflow = cp.zeros(1, dtype=cp.int32)
+    else:
+        state.d_walk_overflow.fill(0)
 
     walk_kernel(
         grid=grid,
@@ -602,6 +687,7 @@ def _launch_bh_walk(
             cp.int32(leaf_direct),
             cp.float64(theta_sq),
             d_acc,
+            state.d_walk_overflow,
         ),
     )
 
@@ -791,7 +877,7 @@ def compute_forces_gpu_bh(
     d_idx = cp.asarray(targets)
     d_acc = cp.zeros((n_targets, 3), dtype=cp.float64)
 
-    wk, _ = _ensure_bh_kernels(cp)
+    wk, _ = _ensure_bh_kernels(cp, n_particles=n)
     _launch_bh_walk(
         cp, wk, st, d_pos, d_mass, d_eps, d_idx,
         n_leaf, n_targets, n_nodes, n, theta, d_acc,
@@ -799,5 +885,6 @@ def compute_forces_gpu_bh(
     cp.cuda.runtime.deviceSynchronize()
 
     result = cp.asnumpy(d_acc)
+    _raise_if_bh_walk_overflow(cp, st)
     logger.debug("[GPU-BH] Complete: %.1fms total", (time() - t0) * 1000)
     return result
