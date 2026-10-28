@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import pytest
 
 from galacticsics.campaign.spec import GridSpec, expand_grid
+from galacticsics.distribution.diskdf_solve import (
+    _sigma_r2_base,
+    bind_disk_kinematics,
+)
 from galacticsics.distribution.toomre import (
     apply_toomre_q_target,
     compute_toomre_q,
@@ -60,6 +65,63 @@ def test_apply_toomre_q_target_scales_sigma_r0(solved_reference):
     assert scaled.disk_kinematics.sigma_r0 == pytest.approx(
         model.disk_kinematics.sigma_r0 * target / q0, rel=1e-6
     )
+
+
+def test_disk_df_uses_correction_table_kinematics() -> None:
+    """A post-potential Q adjustment must replace the stale dbh header value."""
+    from types import SimpleNamespace
+
+    model = GalaxyModel.reference_disk_halo()
+    pot = SimpleNamespace(model=model)
+    tuned_sigma_r0 = 1.37 * model.disk_kinematics.sigma_r0
+    bind_disk_kinematics(
+        pot,
+        sigma_r0=tuned_sigma_r0,
+        sigma_r_scale=model.disk_kinematics.sigma_r_scale,
+    )
+
+    radius = 2.5 * model.disk.scale_length
+    expected = tuned_sigma_r0**2 * math.exp(
+        -radius / model.disk_kinematics.sigma_r_scale
+    )
+    assert pot.model.disk_kinematics.sigma_r0 == pytest.approx(tuned_sigma_r0)
+    assert _sigma_r2_base(radius, pot.model) == pytest.approx(expected)
+
+
+def test_diskdf_solver_binds_q_adjusted_kinematics(
+    solved_reference,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The correction integral itself must see the post-potential Q scaling."""
+    from galacticsics.distribution import diskdf_solve
+
+    model, work_dir = solved_reference
+    tuned_sigma_r0 = 1.29 * model.disk_kinematics.sigma_r0
+    tuned = replace(
+        model,
+        disk_kinematics=replace(
+            model.disk_kinematics,
+            sigma_r0=tuned_sigma_r0,
+        ),
+    )
+    seen_sigma_r0: list[float] = []
+
+    def record_integral(vt, pot, *args):
+        del vt, args
+        seen_sigma_r0.append(pot.model.disk_kinematics.sigma_r0)
+        return 1.0
+
+    monkeypatch.setattr(diskdf_solve, "_integrate_vphi", record_integral)
+    corr = diskdf_solve.solve_diskdf_python(
+        tuned,
+        work_dir,
+        n_radial_steps=2,
+        n_iterations=1,
+    )
+
+    assert seen_sigma_r0
+    assert seen_sigma_r0 == pytest.approx([tuned_sigma_r0] * len(seen_sigma_r0))
+    assert corr.sigma_r0 == pytest.approx(tuned_sigma_r0)
 
 
 def test_log_toomre_q_writes_file(solved_reference):

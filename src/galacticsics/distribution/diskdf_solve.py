@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,30 @@ from galacticsics.io.formats import read_frequency_table
 from galacticsics.models import GalaxyModel
 from galacticsics.numerics import bounded_linear_interpolator
 from galacticsics.potential.evaluate import evaluate_potential
+
+
+def bind_disk_kinematics(
+    pot,
+    *,
+    sigma_r0: float,
+    sigma_r_scale: float,
+):
+    """Bind the radial-dispersion law used by a disk DF calculation.
+
+    ``dbh.dat`` records the kinematics present during the potential solve,
+    while a later Toomre-Q adjustment is recorded in ``cordbh.dat``.  Python
+    DF calculations must bind the current values explicitly instead of
+    silently reusing the stale potential-file header.
+    """
+    pot.model = replace(
+        pot.model,
+        disk_kinematics=replace(
+            pot.model.disk_kinematics,
+            sigma_r0=float(sigma_r0),
+            sigma_r_scale=float(sigma_r_scale),
+        ),
+    )
+    return pot
 
 
 class _RcircInterpolator:
@@ -547,6 +572,11 @@ def solve_diskdf_python(
     disk = model.disk
     assert disk is not None
     kin = model.disk_kinematics
+    bind_disk_kinematics(
+        pot,
+        sigma_r0=kin.sigma_r0,
+        sigma_r_scale=kin.sigma_r_scale,
+    )
     nrspl = n_radial_steps or kin.n_radial_steps
     niter = n_iterations or kin.n_iterations
     relax = _diskdf_relaxation(model) if relax is None else float(relax)

@@ -123,6 +123,7 @@ def sample_disk_python(
         _find_fmax_and_velocity,
         _sigma_r2,
         _sigma_z2,
+        bind_disk_kinematics,
     )
     from galacticsics.numerics import bounded_linear_interpolator
 
@@ -134,6 +135,11 @@ def sample_disk_python(
     pot = read_harmonic_potential(work_dir / "dbh.dat")
     freq = read_frequency_table(work_dir / "freqdbh.dat")
     corr = read_disk_correction(work_dir / "cordbh.dat")
+    bind_disk_kinematics(
+        pot,
+        sigma_r0=corr.sigma_r0,
+        sigma_r_scale=corr.sigma_r_scale,
+    )
     rcirc_fn = _RcircInterpolator(pot, freq)
     spline_d = bounded_linear_interpolator(corr.radius, corr.f_d)
     spline_sz = bounded_linear_interpolator(corr.radius, corr.f_sz)

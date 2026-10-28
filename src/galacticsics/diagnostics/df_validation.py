@@ -383,11 +383,20 @@ def validate_disk_df(
 
     df_positive_frac = float("nan")
     if (work_dir / "dbh.dat").is_file() and (work_dir / "freqdbh.dat").is_file():
-        from galacticsics.distribution.diskdf_solve import _RcircInterpolator, _diskdf5ez
+        from galacticsics.distribution.diskdf_solve import (
+            _RcircInterpolator,
+            _diskdf5ez,
+            bind_disk_kinematics,
+        )
         from galacticsics.numerics import bounded_linear_interpolator
 
         pot = read_harmonic_potential(work_dir / "dbh.dat")
         freq = read_frequency_table(work_dir / "freqdbh.dat")
+        bind_disk_kinematics(
+            pot,
+            sigma_r0=corr.sigma_r0,
+            sigma_r_scale=corr.sigma_r_scale,
+        )
         rcirc_fn = _RcircInterpolator(pot, freq)
         spline_d = bounded_linear_interpolator(corr.radius, corr.f_d)
         spline_sz = bounded_linear_interpolator(corr.radius, corr.f_sz)

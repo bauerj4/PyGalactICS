@@ -39,7 +39,23 @@ radius proportional to `r^2 max_mu rho(Psi(r, mu))`, then performs only the
 angular rejection. This retains the OpenMP sampler's throughput without
 assuming spherical density in the final disk potential.
 
-`mr.dat` now records the profile masses and solved radial edge. The disk entry
+The radial envelope is constructed for the same dense `rho(Psi)` interpolation
+used by both samplers. For every radial interval, the builder finds the maximum
+density at all `Psi`-table knots spanned by that interval and raises both
+endpoints to cover it before applying the safety margin. This matters because
+`rho(Psi)` can have a narrow peak between radial knots; a margin applied only
+to point samples can still be undercut when the envelope is interpolated.
+
+Disk-free spherical solves are a deliberate exception to the `rho(Psi)`
+construction path. Their fast monopole solver uses the analytic NFW and Sersic
+densities directly because the auxiliary DF round trip can be ill-conditioned
+on a compact coarse grid. Their persisted profiles and masses therefore use
+those same analytic `rho(r)` fields. The radial CDF is the exact spherical
+proposal, so no angular rejection or `rho(Psi)` interpolation is needed. This
+preserves the same invariant: solve, mass, position, and velocity sampling all
+refer to one component density.
+
+`mr.dat` now records the profile masses and sampled radial edge. The disk entry
 records the configured disk mass, which is also the mass used by the disk
 sampler.
 

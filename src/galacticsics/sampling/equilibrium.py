@@ -113,14 +113,21 @@ def build_equilibrium_spatial_profile(
     energies, densities = _read_density_table(Path(density_table))
     density_at_psi = _density_evaluator(potential, component, energies, densities)
 
+    # Both samplers evaluate rho through this regular Psi table.  Build the
+    # rejection envelope from that same interpolation, while retaining the
+    # component-specific evaluator below for the reported mass integral.
+    psi_grid = np.linspace(potential.psic, potential.psi0, n_psi, dtype=np.float64)
+    density = np.asarray(density_at_psi(psi_grid), dtype=np.float64)
+
     radial_count = n_radius or min(max(potential.nr + 1, 257), 4097)
     radial_coordinate = np.linspace(0.0, 1.0, radial_count, dtype=np.float64)
     radius = potential.r_edge * radial_coordinate * radial_coordinate
     mu = np.linspace(0.0, 1.0, n_mu, dtype=np.float64)
+    angular_psi = np.empty((radial_count, n_mu), dtype=np.float64)
     angular_density = np.empty((radial_count, n_mu), dtype=np.float64)
 
     for i, r in enumerate(radius):
-        psi = np.array(
+        psi_values = np.array(
             [
                 evaluate_potential(
                     potential,
@@ -131,9 +138,45 @@ def build_equilibrium_spatial_profile(
             ],
             dtype=float,
         )
-        angular_density[i] = density_at_psi(psi)
+        angular_psi[i] = psi_values
+        angular_density[i] = density_at_psi(psi_values)
 
-    envelope = envelope_margin * np.max(angular_density, axis=1)
+    proposal_angular_density = np.interp(
+        angular_psi,
+        psi_grid,
+        density,
+        left=0.0,
+    )
+    raw_envelope = np.max(proposal_angular_density, axis=1)
+    # The tabulated rho(Psi) need not be monotone and can contain a narrow peak
+    # between radial knots.  Bound each radial interval by every rho-table knot
+    # in the Psi range spanned by its endpoints.  Assigning that bound to both
+    # ends makes subsequent linear interpolation conservative throughout the
+    # interval; the margin covers angular and potential interpolation error.
+    interval_upper = np.zeros(max(len(radius) - 1, 0), dtype=np.float64)
+    for i in range(len(interval_upper)):
+        psi_lo = min(float(np.min(angular_psi[i])), float(np.min(angular_psi[i + 1])))
+        psi_hi = max(float(np.max(angular_psi[i])), float(np.max(angular_psi[i + 1])))
+        edge_density = max(
+            float(np.interp(psi_lo, psi_grid, density, left=0.0)),
+            float(np.interp(psi_hi, psi_grid, density, left=0.0)),
+        )
+        first = int(np.searchsorted(psi_grid, psi_lo, side="left"))
+        last = int(np.searchsorted(psi_grid, psi_hi, side="right"))
+        interior_density = (
+            float(np.max(density[first:last])) if last > first else 0.0
+        )
+        interval_upper[i] = max(edge_density, interior_density)
+
+    interval_safe_envelope = raw_envelope.copy()
+    if len(interval_upper) > 0:
+        interval_safe_envelope[0] = max(raw_envelope[0], interval_upper[0])
+        interval_safe_envelope[-1] = max(raw_envelope[-1], interval_upper[-1])
+    if len(interval_upper) > 1:
+        interval_safe_envelope[1:-1] = np.maximum.reduce(
+            (raw_envelope[1:-1], interval_upper[:-1], interval_upper[1:])
+        )
+    envelope = envelope_margin * interval_safe_envelope
     shell_envelope = radius * radius * envelope
     radial_cdf = np.zeros_like(radius)
     dr = np.diff(radius)
@@ -149,19 +192,79 @@ def build_equilibrium_spatial_profile(
     shell_mass = radius * radius * angular_integral
     mass = float(2.0 * np.pi * np.trapezoid(shell_mass, radius))
 
-    # A dense regular Psi grid lets both Python and C samplers use the same
-    # cheap linear interpolation while retaining the solver's component-specific
-    # density interpolation to much better than Monte Carlo sampling noise.
-    psi = np.linspace(potential.psic, potential.psi0, n_psi, dtype=np.float64)
-    density = np.asarray(density_at_psi(psi), dtype=np.float64)
-
     return EquilibriumSpatialProfile(
         component=component,
         radius=np.ascontiguousarray(radius),
         envelope=np.ascontiguousarray(envelope),
         radial_cdf=np.ascontiguousarray(radial_cdf),
-        psi=np.ascontiguousarray(psi),
+        psi=np.ascontiguousarray(psi_grid),
         density=np.ascontiguousarray(density),
+        mass=mass,
+    )
+
+
+def build_spherical_spatial_profile(
+    potential: HarmonicPotential,
+    *,
+    component: str,
+    n_radius: int = 4097,
+) -> EquilibriumSpatialProfile:
+    """Build a profile for a component solved directly as analytic ``rho(r)``.
+
+    The disk-free fast solver synthesizes its monopole from the analytic halo
+    and bulge densities, deliberately bypassing numerically degenerate
+    ``rho(Psi)`` round trips.  Its sampling profile must use that same spatial
+    source rather than the auxiliary ``denspsi`` table.
+    """
+    from galacticsics.potential.poisson.densities import (
+        bulge_density_on_grid,
+        halo_density_spherical_array,
+    )
+
+    if n_radius < 3:
+        raise ValueError("n_radius must be at least 3")
+    if component == "halo":
+        halo = potential.model.halo
+        if halo is None or not halo.enabled:
+            raise ValueError("enabled halo required for spherical profile")
+        radial_edge = halo.r_outer
+        coordinate = np.linspace(0.0, 1.0, n_radius, dtype=np.float64)
+        radius = radial_edge * coordinate * coordinate
+        spatial_density = halo_density_spherical_array(radius, halo)
+    elif component == "bulge":
+        bulge = potential.model.bulge
+        if bulge is None or not bulge.enabled:
+            raise ValueError("enabled bulge required for spherical profile")
+        radial_edge = 3.0 * bulge.a
+        coordinate = np.linspace(0.0, 1.0, n_radius, dtype=np.float64)
+        radius = radial_edge * coordinate * coordinate
+        spatial_density = bulge_density_on_grid(radius, bulge)
+    else:
+        raise ValueError(f"unsupported equilibrium component: {component}")
+    spatial_density[0] = spatial_density[1]
+
+    # The radial CDF is already the exact spherical proposal. Unit lookup
+    # tables make angular acceptance unconditional in both samplers.
+    envelope = np.ones_like(radius)
+    shell_envelope = radius * radius * spatial_density
+    radial_cdf = np.zeros_like(radius)
+    radial_cdf[1:] = np.cumsum(
+        0.5 * (shell_envelope[1:] + shell_envelope[:-1]) * np.diff(radius)
+    )
+    if not np.isfinite(radial_cdf[-1]) or radial_cdf[-1] <= 0.0:
+        raise ValueError(f"empty {component} equilibrium spatial profile")
+    radial_cdf /= radial_cdf[-1]
+
+    mass = float(
+        4.0 * np.pi * np.trapezoid(radius * radius * spatial_density, radius)
+    )
+    return EquilibriumSpatialProfile(
+        component=component,
+        radius=np.ascontiguousarray(radius),
+        envelope=np.ascontiguousarray(envelope),
+        radial_cdf=np.ascontiguousarray(radial_cdf),
+        psi=np.ascontiguousarray([potential.psic, potential.psi0]),
+        density=np.ascontiguousarray([1.0, 1.0]),
         mass=mass,
     )
 

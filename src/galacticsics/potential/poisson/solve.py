@@ -76,6 +76,34 @@ def _write_equilibrium_spatial_profiles(
     return masses
 
 
+def _write_spherical_spatial_profiles(
+    work_dir: Path,
+    potential: HarmonicPotential,
+    *,
+    has_bulge: bool,
+) -> dict[str, float]:
+    """Persist profiles matching the analytic densities of the fast monopole solve."""
+    from galacticsics.sampling.equilibrium import (
+        build_spherical_spatial_profile,
+        write_equilibrium_spatial_profile,
+    )
+
+    masses: dict[str, float] = {}
+    for component, enabled in (("halo", True), ("bulge", has_bulge)):
+        if not enabled:
+            continue
+        profile = build_spherical_spatial_profile(
+            potential,
+            component=component,
+        )
+        write_equilibrium_spatial_profile(
+            work_dir / f"{component}_spatial_profile.npz",
+            profile,
+        )
+        masses[component] = profile.mass
+    return masses
+
+
 def _assert_python_supported(model: GalaxyModel) -> None:
     """
     Validate that the model uses only Python-supported components.
@@ -130,6 +158,25 @@ def _scaled_polar_node_count(max_harmonic_degree: int, n_radial_shells: int) -> 
         Odd node count suitable for Simpson quadrature.
     """
     return quadrature_node_count(max(6, min(max_harmonic_degree * 4 + 2, 12 + n_radial_shells // 20)))
+
+
+def _relative_harmonic_change(
+    previous: np.ndarray,
+    current: np.ndarray,
+    *,
+    active_lmax: int,
+) -> float:
+    """Return the largest scale-normalized change among active harmonics."""
+    n_active = active_lmax // 2 + 1
+    monopole_scale = max(float(np.max(np.abs(current[0]))), 1.0)
+    changes: list[float] = []
+    for row in range(n_active):
+        scale = max(
+            float(np.max(np.abs(current[row]))),
+            monopole_scale * 1.0e-12,
+        )
+        changes.append(float(np.max(np.abs(current[row] - previous[row]))) / scale)
+    return max(changes, default=0.0)
 
 
 def _resolve_solve_workers(n_workers: int | None) -> int:
@@ -419,16 +466,15 @@ def _solve_spherical_monopole_python(
         fr2=force_second_harmonics,
     )
     write_harmonic_potential(pot, work_dir / "dbh.dat")
-    spheroid_masses = _write_equilibrium_spatial_profiles(
+    spheroid_masses = _write_spherical_spatial_profiles(
         work_dir,
         pot,
-        has_halo=True,
         has_bulge=has_bulge,
     )
     halo_mass = spheroid_masses["halo"]
-    halo_outer_radius = pot.r_edge
+    halo_outer_radius = halo.r_outer
     bulge_mass = spheroid_masses.get("bulge", 0.0)
-    bulge_outer_radius = pot.r_edge if has_bulge else 0.0
+    bulge_outer_radius = 3.0 * bulge.a if bulge is not None else 0.0
     (work_dir / "rtidal.dat").write_text(f"{tidal_radius}\n")
     (work_dir / "mr.dat").write_text(
         f"0.0 0.0\n{bulge_mass} {bulge_outer_radius}\n{halo_mass} {halo_outer_radius}\n"
@@ -779,6 +825,8 @@ def solve_poisson_python(
     previous_active_lmax = -2
     previous_tidal_radius = 1e10
     tidal_radius_change = 2 * radial_step
+    tidal_radius_converged = False
+    harmonic_change = math.inf
     potential_relaxation_factor = (
         0.97
         if model.disk is not None
@@ -795,7 +843,7 @@ def solve_poisson_python(
 
     for iteration in range(max_iter):
         if active_lmax == 0 or active_lmax == max_harmonic_degree:
-            if tidal_radius_change < radial_step and iteration > 10:
+            if tidal_radius_converged and iteration > 10:
                 active_lmax = min(active_lmax + harmonic_ramp_step, max_harmonic_degree)
         else:
             active_lmax = min(active_lmax + harmonic_ramp_step, max_harmonic_degree)
@@ -803,6 +851,7 @@ def solve_poisson_python(
             break
         arrays.lmax_active = active_lmax
         n_polar_nodes = _scaled_polar_node_count(active_lmax, n_radial_shells)
+        previous_potential_harmonics = arrays.apot.copy()
 
         from galacticsics.potential.poisson.disk_vertical import (
             disk_vertical_normalization_table,
@@ -853,6 +902,11 @@ def solve_poisson_python(
         arrays.apot[0, :] = (
             arrays.apot[0, :] + reference_potential * math.sqrt(4 * math.pi) - monopole_at_origin
         )
+        harmonic_change = _relative_harmonic_change(
+            previous_potential_harmonics,
+            arrays.apot,
+            active_lmax=active_lmax,
+        )
 
         next_norm_radii, next_norm_values = disk_vertical_normalization_table(
             arrays, model
@@ -889,6 +943,7 @@ def solve_poisson_python(
 
         potential_at_shell = reference_potential
         tidal_radius = halo.r_outer
+        tidal_crossing_found = False
         for shell_index in range(1, n_radial_shells + 1):
             potential_at_inner_shell = potential_at_shell
             potential_at_shell = potential_at(arrays, model, shell_index * radial_step, 0.0)
@@ -905,14 +960,23 @@ def solve_poisson_python(
                 ) * radial_step
                 tidal_radius_change = abs(tidal_radius - previous_tidal_radius)
                 previous_tidal_radius = tidal_radius
+                tidal_crossing_found = True
                 break
+        if tidal_crossing_found:
+            tidal_radius_converged = tidal_radius_change < radial_step
         else:
-            tidal_radius_change = 2 * radial_step
+            # A cutoff outside the finite radial grid provides no radius to
+            # converge.  Treat that diagnostic as inapplicable; otherwise the
+            # lmax ramp remains at zero forever and writes a sphericalized disk
+            # potential under a nominally multipole header.
+            tidal_radius_change = 0.0
+            tidal_radius_converged = True
 
         previous_active_lmax = active_lmax
         if (
             active_lmax >= max_harmonic_degree
-            and tidal_radius_change < radial_step
+            and tidal_radius_converged
+            and harmonic_change < 1.0e-3
             and disk_norm_change < 1.0e-3
         ):
             break
@@ -934,6 +998,16 @@ def solve_poisson_python(
             warnings.warn(message, RuntimeWarning, stacklevel=2)
         else:
             raise RuntimeError(message)
+
+    if (
+        has_disk
+        and max_harmonic_degree > 0
+        and not np.any(np.abs(arrays.apot[1:]) > 0.0)
+    ):
+        raise RuntimeError(
+            "disk solve requested non-spherical harmonics, but the converged "
+            "potential contains only a monopole"
+        )
 
     arrays.lmax_active = max_harmonic_degree
     if has_disk and model.disk is not None:

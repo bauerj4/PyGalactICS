@@ -428,10 +428,16 @@ def _assert_solve_artifacts(work: Path, case: SolveCase) -> None:
         assert pot.dr == pytest.approx(case.expect_dr)
 
     if case.expect_disk_asymmetry:
-        psi_mid = evaluate_potential(pot, 2.0, 0.0)
-        psi_off = evaluate_potential(pot, 2.0, 0.5)
+        assert any(abs(value) > 0.0 for value in pot.apot[1:].flat), (
+            f"disk solve wrote only a monopole for {case.label}"
+        )
+        spherical_radius = 2.0
+        z_off = 0.5
+        r_off = math.sqrt(spherical_radius**2 - z_off**2)
+        psi_mid = evaluate_potential(pot, spherical_radius, 0.0)
+        psi_off = evaluate_potential(pot, r_off, z_off)
         assert abs(psi_mid - psi_off) > 1e-4, (
-            f"disk should break axisymmetry in evaluated potential for {case.label}"
+            f"disk should break spherical symmetry in evaluated potential for {case.label}"
         )
 
     for r, z in ((0.0, 0.0), (0.8, 0.0), (2.0, 0.3), (5.0, 1.0)):
