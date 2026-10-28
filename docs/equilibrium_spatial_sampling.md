@@ -59,6 +59,24 @@ refer to one component density.
 records the configured disk mass, which is also the mass used by the disk
 sampler.
 
+## Disk velocity rejection support
+
+The corrected non-spherical potential also exposed a separate disk-sampling
+bug. The sampler first searched for the azimuthal DF mode within eight velocity
+dispersions of the circular speed, then recentered a second eight-dispersion
+proposal on the selected mode. When the search selected its lower boundary,
+the recentered proposal extended another eight dispersions into velocities that
+had never been included in the rejection-envelope calculation. Near the outer
+disk this interval can include the narrow low-angular-momentum cusp of
+`rcirc(|Lz|)`. Trials there exceeded the nominal envelope, so the OpenMP path
+aborted and the campaign silently fell back to the slow Python sampler.
+
+The mode search now prefers an interior basin, then measures the rejection
+envelope across the complete recentered proposal support. It also probes both
+sides of `v_phi = 0` explicitly because a uniform grid can miss that narrow
+cusp. The remaining factor-of-two margin is applied only after this support
+scan. Python and OpenMP samplers use the same construction.
+
 ## Validation
 
 The regression tests require `mr.dat` to match the persisted final-potential
@@ -69,4 +87,7 @@ On the corpus model that exposed the bug, a 20,000-particle control changed the
 continuous-potential virial ratio from `0.925` to `1.008`. A separate
 50,000-particle softened pair estimate gave `1.081 +/- 0.001`, compared with
 `0.827` in the original 1.75-million-particle realization. The restarted
-full-resolution corpus remains the end-to-end morphology check.
+full-resolution corpus remains the end-to-end morphology check. The disk
+velocity fix was additionally exercised on the exact corrected corpus model:
+the OpenMP sampler generated all 1,000,000 disk particles in 8.7 seconds with
+finite phase-space coordinates and no envelope fallback.

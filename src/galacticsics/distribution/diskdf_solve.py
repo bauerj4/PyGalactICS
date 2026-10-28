@@ -324,8 +324,10 @@ def _find_fmax_and_velocity(
             vpmax,
         )
 
-    # A half-sigma grid is cheap compared with a failed rejection loop and is
-    # fine enough to select the correct basin before golden-section refinement.
+    # Use the initial circular-speed-centred scan to select an *interior* mode.
+    # Selecting a boundary point and then recentering an eight-sigma proposal
+    # around it extends the actual proposal beyond the domain whose maximum was
+    # measured.  That was the source of the outer-disk envelope failures.
     coarse_offsets = np.linspace(-8.0, 8.0, 33)
     coarse_log_values = np.asarray(
         [
@@ -344,7 +346,17 @@ def _find_fmax_and_velocity(
             for offset in coarse_offsets
         ]
     )
-    best = int(np.argmax(coarse_log_values))
+    interior_modes = [
+        i
+        for i in range(1, coarse_offsets.size - 1)
+        if coarse_log_values[i] >= coarse_log_values[i - 1]
+        and coarse_log_values[i] >= coarse_log_values[i + 1]
+    ]
+    best = (
+        max(interior_modes, key=lambda i: coarse_log_values[i])
+        if interior_modes
+        else int(np.argmax(coarse_log_values))
+    )
     center = float(coarse_offsets[best])
     lo = max(-8.0, center - 0.5)
     hi = min(8.0, center + 0.5)
@@ -390,9 +402,26 @@ def _find_fmax_and_velocity(
         best_log = log_right
         best_offset = right
     vphi_at_max = vpmax + best_offset * vsigp
-    if not math.isfinite(best_log) or best_log < -745.0:
+
+    # The rejection proposal is centred on ``vphi_at_max``, not ``vpmax``.
+    # Measure the envelope over that complete final support.  The DF has a very
+    # narrow one-sided cusp as v_phi approaches zero because rcirc(|Lz|) tends
+    # to zero; a uniform grid can miss it, so probe logarithmically close to
+    # zero whenever zero lies inside the proposal.
+    support_lo = best_offset - 8.0
+    support_hi = best_offset + 8.0
+    envelope_offsets = np.linspace(support_lo, support_hi, 129)
+    envelope_log = max(best_log, *(log_at(float(o)) for o in envelope_offsets))
+    zero_offset = -vpmax / vsigp
+    if support_lo <= zero_offset <= support_hi:
+        for delta in (1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2):
+            for offset in (zero_offset - delta, zero_offset + delta):
+                if support_lo <= offset <= support_hi:
+                    envelope_log = max(envelope_log, log_at(offset))
+
+    if not math.isfinite(envelope_log) or envelope_log < -745.0:
         return 0.0, vphi_at_max
-    return math.exp(min(best_log, 700.0)), vphi_at_max
+    return math.exp(min(envelope_log, 700.0)), vphi_at_max
 
 
 def _find_fmax(

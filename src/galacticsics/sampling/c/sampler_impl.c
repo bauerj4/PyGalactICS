@@ -4,6 +4,9 @@
 
 #include "sampler.h"
 
+/* Keep in sync with DISK_VELOCITY_ENVELOPE_SAFETY in python/samplers.py. */
+#define DISK_VELOCITY_ENVELOPE_SAFETY 2.0
+
 #include <math.h>
 #include <string.h>
 
@@ -448,15 +451,30 @@ double find_fmax(
         *vphi_mode = vpmax;
         return diskdf5ez(0.0, vpmax, 0.0, r, z, pot, freq, corr, rcirc);
     }
-    double best_log = -INFINITY;
-    int best_i = 0;
+    double coarse_log[33];
     for (int i = 0; i <= 32; i++) {
         double offset = -8.0 + 0.5 * (double)i;
         double v = vpmax + offset * vsigp;
-        double log_f = log_diskdf5ez(0.0, v, 0.0, r, z, pot, freq, corr, rcirc);
-        if (log_f > best_log) {
-            best_log = log_f;
+        coarse_log[i] = log_diskdf5ez(
+            0.0, v, 0.0, r, z, pot, freq, corr, rcirc
+        );
+    }
+    int best_i = -1;
+    double best_log = -INFINITY;
+    for (int i = 1; i < 32; i++) {
+        if (coarse_log[i] >= coarse_log[i - 1]
+            && coarse_log[i] >= coarse_log[i + 1]
+            && coarse_log[i] > best_log) {
+            best_log = coarse_log[i];
             best_i = i;
+        }
+    }
+    if (best_i < 0) {
+        for (int i = 0; i <= 32; i++) {
+            if (coarse_log[i] > best_log) {
+                best_log = coarse_log[i];
+                best_i = i;
+            }
         }
     }
     double center = -8.0 + 0.5 * (double)best_i;
@@ -500,10 +518,47 @@ double find_fmax(
         best_offset = right;
     }
     *vphi_mode = vpmax + best_offset * vsigp;
-    if (!isfinite(best_log) || best_log < -745.0) {
+
+    /* Recentring changes the actual proposal support.  Scan that complete
+       interval rather than reusing the circular-speed-centred maximum. */
+    double support_lo = best_offset - 8.0;
+    double support_hi = best_offset + 8.0;
+    double envelope_log = best_log;
+    for (int i = 0; i <= 128; i++) {
+        double offset = support_lo + (support_hi - support_lo) * (double)i / 128.0;
+        double log_f = log_diskdf5ez(
+            0.0, vpmax + offset * vsigp, 0.0, r, z, pot, freq, corr, rcirc
+        );
+        if (log_f > envelope_log) {
+            envelope_log = log_f;
+        }
+    }
+    /* rcirc(|Lz|) produces a narrow one-sided cusp near v_phi=0.  Probe it
+       explicitly when it lies inside the recentered proposal. */
+    double zero_offset = -vpmax / vsigp;
+    if (zero_offset >= support_lo && zero_offset <= support_hi) {
+        const double cusp_delta[5] = {1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2};
+        for (int i = 0; i < 5; i++) {
+            for (int sign = -1; sign <= 1; sign += 2) {
+                double offset = zero_offset + (double)sign * cusp_delta[i];
+                if (offset < support_lo || offset > support_hi) {
+                    continue;
+                }
+                double log_f = log_diskdf5ez(
+                    0.0, vpmax + offset * vsigp, 0.0, r, z,
+                    pot, freq, corr, rcirc
+                );
+                if (log_f > envelope_log) {
+                    envelope_log = log_f;
+                }
+            }
+        }
+    }
+
+    if (!isfinite(envelope_log) || envelope_log < -745.0) {
         return 0.0;
     }
-    return exp(fmin(best_log, 700.0));
+    return exp(fmin(envelope_log, 700.0));
 }
 
 /* --- OpenMP samplers --- */
@@ -816,7 +871,7 @@ int sample_disk_omp(
             double vsigp = (omega > 0.0) ? kappa / (2.0 * omega) * vsigR : 0.0;
             double vsigz = sqrt(sigma_z2(pot, corr, r_try));
             double vphi_mode = vphimax;
-            double fmax = 2.0 * find_fmax(
+            double fmax = DISK_VELOCITY_ENVELOPE_SAFETY * find_fmax(
                 vphimax, r_try, z_try, pot, freq, corr, rcirc, vsigp, &vphi_mode
             );
             if (fmax <= 0.0) {

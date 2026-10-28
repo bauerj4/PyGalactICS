@@ -17,6 +17,11 @@ from galacticsics.io.formats import (
 )
 from galacticsics.potential.evaluate import evaluate_potential
 from galacticsics.sampling.particles import PARTICLE_DTYPE, ParticleSet
+
+
+# Residual safety margin after ``_find_fmax_and_velocity`` scans the complete
+# recentered proposal support, including the narrow low-angular-momentum cusp.
+DISK_VELOCITY_ENVELOPE_SAFETY = 2.0
 from galacticsics.sampling.sampler import SampleConfig
 
 
@@ -205,7 +210,7 @@ def sample_disk_python(
             spline_sz,
             vsigp,
         )
-        fmax = 2.0 * raw_fmax
+        fmax = DISK_VELOCITY_ENVELOPE_SAFETY * raw_fmax
         if fmax <= 0.0:
             raise RuntimeError(
                 "disk velocity envelope is non-positive at "
