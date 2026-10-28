@@ -26,26 +26,50 @@ def _small_model() -> GalaxyModel:
     return replace(model, grid=PotentialGrid(dr=0.15, nr=60, lmax=2))
 
 
+def _sampling_model() -> GalaxyModel:
+    """Compact model with enough central resolution for a valid disk DF."""
+    from galacticsics.models import NFWHalo, SersicBulge
+
+    base = GalaxyModel.reference_disk_halo()
+    assert base.disk is not None
+    return replace(
+        base,
+        disk=replace(
+            base.disk,
+            mass=6.0,
+            scale_length=2.0,
+            outer_radius=8.0,
+            trunc_width=1.0,
+        ),
+        halo=NFWHalo(
+            r_outer=40.0,
+            v0=3.2,
+            a=25.0,
+            dr_trunc=6.0,
+            enabled=True,
+        ),
+        bulge=SersicBulge(
+            n_sersic=4.0,
+            ppp=0.5,
+            v0=1.5,
+            a=0.4,
+            enabled=True,
+        ),
+        grid=PotentialGrid(dr=0.05, nr=800, lmax=2),
+    )
+
+
 @pytest.fixture(scope="module")
 def python_work_dir() -> Path:
-    import shutil
-
     from galacticsics.io.legacy_inputs import write_gendenspsi_input
-    from tests.fixtures.milkyway import reference_artifacts_dir
 
-    model = _small_model()
+    model = _sampling_model()
     tmp = tempfile.TemporaryDirectory(prefix="galacticsics_py_physics_")
     work = Path(tmp.name)
     solve_potential(model, work_dir=work, cleanup=False, backend=PhysicsBackendKind.PYTHON)
-    ref = reference_artifacts_dir()
-    for name in ("cordbh.dat",):
-        src = ref / name
-        if src.is_file():
-            shutil.copy2(src, work / name)
-    if not (work / "cordbh.dat").is_file():
-        from galacticsics.distribution.diskdf_solve import solve_diskdf_python
+    from galacticsics.distribution.diskdf_solve import solve_diskdf_python
 
-        solve_diskdf_python(model, work, n_iterations=1, n_radial_steps=12)
+    solve_diskdf_python(model, work, n_iterations=10, n_radial_steps=50)
     write_gendenspsi_input(work / "in.gendenspsi")
     yield work
     tmp.cleanup()
@@ -102,12 +126,9 @@ def test_python_diskdf_valid_cordbh(tmp_path: Path) -> None:
 
 
 @pytest.mark.physics_python
-def test_python_sample_moments(python_work_dir: Path, reference_artifacts_dir: Path) -> None:
-    import shutil
-
-    model = _small_model()
-    if not cordbh_is_valid(python_work_dir / "cordbh.dat"):
-        shutil.copy2(reference_artifacts_dir / "cordbh.dat", python_work_dir / "cordbh.dat")
+def test_python_sample_moments(python_work_dir: Path) -> None:
+    model = read_harmonic_potential(python_work_dir / "dbh.dat").model
+    assert cordbh_is_valid(python_work_dir / "cordbh.dat")
     result = sample_galaxy(
         model,
         SampleConfig(n_disk=32, n_halo=32, run_diskdf=False),

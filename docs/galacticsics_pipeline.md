@@ -256,8 +256,12 @@ Velocity dispersions (before correction):
 $$
 \sigma_R^2(r) = \sigma_{R,0}^2 \exp(-r / r_{\sigma R}) \quad\text{(`sigr2.f`)},
 \qquad
-\sigma_z^2(r) = \frac{\Psi(r, 3z_d) - \Psi(r,0)}{\ln 0.419974} \quad\text{(vertical ansatz)}.
+\sigma_z^2(r) = \frac{\Psi(r, z_d) - \Psi(r,0)}{\ln 0.419974} \quad\text{(`sigz2.f`)}.
 $$
+
+The separate $3z_d$ anchor, where $\mathrm{sech}^2(3)=0.009866$, belongs
+to the potential-dependent density ansatz; it is not the calibration point
+for $\sigma_z$.
 
 
 The 3D epicycle DF is factored as:
@@ -287,13 +291,14 @@ variant `diskdf5intez` / `diskdf3intez`.
    (Simpson in $v_\phi$, 101 nodes).
 3. Compare integrated midplane density to target `diskdens` (`rho0`, `rhoz`).
 4. Update $f_d \leftarrow f_d / (d_0/\rho_0)$ and $f_{sz}$ from the vertical ratio.
-5. Write cubic-spline nodes to `cordbh.dat` (`fdrat`, `fszrat`).
+5. Write correction-table nodes to `cordbh.dat` (`fdrat`, `fszrat`); runtime
+   interpolation is bounded and linear.
 
 Corrections enter the DF as:
 
 
 $$
-\sigma_R^2 \leftarrow \sigma_{R,0}^2 \cdot f_d,
+\sigma_R^2 \leftarrow \sigma_{R,0}^2\exp(-r/r_{\sigma R}) \quad\text{(unchanged)},
 \qquad
 \sigma_z^2 \leftarrow \sigma_{z,\mathrm{base}}^2 \cdot f_{sz},
 \qquad

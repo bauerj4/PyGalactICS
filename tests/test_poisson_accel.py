@@ -187,6 +187,14 @@ def test_openmp_fill_matches_python() -> None:
 def test_solve_poisson_python_small_grid() -> None:
     model = _small_model()
     with tempfile.TemporaryDirectory() as tmp:
-        pot = solve_poisson_python(model, Path(tmp), npsi=128, nint=8, max_iter=12, n_workers=0)
+        with pytest.warns(RuntimeWarning, match="did not converge within 12"):
+            pot = solve_poisson_python(
+                model,
+                Path(tmp),
+                npsi=128,
+                nint=8,
+                max_iter=12,
+                n_workers=0,
+            )
         assert pot.psi0 != 0.0
         assert np.all(np.isfinite(pot.adens))

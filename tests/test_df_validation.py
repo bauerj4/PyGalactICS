@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,12 +22,33 @@ from galacticsics.sampling.sampler import SampleConfig, sample_galaxy
 from ntropy.integrations.galacticsics import merge_galacticsics_components
 from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
-from tests.fixtures.milkyway import reference_artifacts_dir
 
 
 def _small_model() -> GalaxyModel:
-    model = GalaxyModel.reference_disk_halo()
-    return replace(model, grid=PotentialGrid(dr=0.15, nr=60, lmax=2))
+    base = GalaxyModel.reference_disk_halo()
+    assert base.disk is not None
+    return replace(
+        base,
+        disk=replace(
+            base.disk,
+            mass=6.0,
+            scale_length=2.0,
+            outer_radius=8.0,
+            trunc_width=1.0,
+        ),
+        halo=NFWHalo(
+            r_outer=40.0,
+            v0=3.2,
+            a=25.0,
+            dr_trunc=6.0,
+            enabled=True,
+        ),
+        bulge=None,
+        # A coarse central frequency grid produces a clipped correction table,
+        # which the sampler now correctly rejects instead of silently biasing
+        # the spatial distribution.
+        grid=PotentialGrid(dr=0.05, nr=800, lmax=2),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -36,16 +56,17 @@ def sampled_work_dir(tmp_path_factory) -> Path:
     work = tmp_path_factory.mktemp("df_validation_sample")
     model = _small_model()
     solve_potential(model, work_dir=work, cleanup=False, backend=PhysicsBackendKind.PYTHON)
-    ref = reference_artifacts_dir()
-    if (ref / "cordbh.dat").is_file():
-        shutil.copy2(ref / "cordbh.dat", work / "cordbh.dat")
-    else:
-        from galacticsics.physics.python_backend import python_ensure_disk_df
+    from galacticsics.physics.python_backend import python_ensure_disk_df
 
-        python_ensure_disk_df(model, work)
+    python_ensure_disk_df(model, work)
     sample_galaxy(
         model,
-        SampleConfig(n_disk=96, n_halo=96, run_diskdf=False),
+        SampleConfig(
+            n_disk=96,
+            n_halo=96,
+            run_diskdf=False,
+            use_openmp=False,
+        ),
         work_dir=work,
         cleanup=False,
         backend=PhysicsBackendKind.PYTHON,
@@ -75,6 +96,9 @@ def test_validate_halo_df_passes(sampled_state: ParticleState, sampled_model: Ga
     assert report["n"] == 96
     assert report["pass"]
     assert report["speed_in_bounds_frac"] >= 0.99
+    # Keep the original absolute quality bound; the report's small-N pass
+    # threshold is deliberately much looser and is not a useful regression
+    # check here. The fixture uses the serial sampler for reproducibility.
     assert report["energy_df_max_log_rel"] < 0.6
 
 

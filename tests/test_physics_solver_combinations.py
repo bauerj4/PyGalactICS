@@ -36,21 +36,15 @@ from galacticsics.sampling.sampler import SampleConfig, ensure_disk_df, sample_g
 def _ensure_cordbh_for_sampling(
     model: GalaxyModel,
     work: Path,
-    *,
-    reference_artifacts_dir: Path | None = None,
 ) -> None:
-    """Run Python diskdf when the grid allows it; else copy reference cordbh for sampling smoke."""
-    import shutil
-
+    """Run Python diskdf, or skip grids that cannot produce their own table."""
     from galacticsics.campaign.spec import assert_dbh_grid_diskdf_compatible
 
     try:
         assert_dbh_grid_diskdf_compatible(model)
-        ensure_disk_df(model, work, backend=PhysicsBackendKind.PYTHON)
-    except ValueError:
-        if reference_artifacts_dir is None:
-            pytest.skip("grid too coarse for diskdf and no reference artifacts")
-        shutil.copy2(reference_artifacts_dir / "cordbh.dat", work / "cordbh.dat")
+    except ValueError as exc:
+        pytest.skip(f"grid cannot generate a model-matched disk DF table: {exc}")
+    ensure_disk_df(model, work, backend=PhysicsBackendKind.PYTHON)
 
 
 def _grid(nr: int, dr: float, lmax: int) -> PotentialGrid:
@@ -582,14 +576,13 @@ def test_python_sample_supported_combination(
     builder: Callable[[], GalaxyModel],
     config: SampleConfig,
     tmp_path: Path,
-    reference_artifacts_dir: Path,
 ) -> None:
     """Solve + sample smoke test for each supported particle layout."""
     model = builder()
     work = tmp_path / label
     _python_solve(model, work)
     if config.n_disk > 0:
-        _ensure_cordbh_for_sampling(model, work, reference_artifacts_dir=reference_artifacts_dir)
+        _ensure_cordbh_for_sampling(model, work)
     result = sample_galaxy(
         model,
         config,

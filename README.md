@@ -601,21 +601,27 @@ tabulated on an energy grid (`gendfnfw`, `denspsihalo.dat`, `dfnfw.dat`).
 
 ### Exponential stellar disk
 
-Midplane surface density with erfc truncation:
+Projected surface density with erfc truncation:
 
 
 $$
 \Sigma(R) = \frac{M}{2\pi R_d^2}\,
-\exp(-R/R_d)\cdot \tfrac{1}{2}\mathrm{erfc}\!\left(\frac{R-R_\mathrm{out}}{\Delta R}\right).
+\exp(-R/R_d)\cdot \tfrac{1}{2}\mathrm{erfc}\!\left(\frac{R-R_\mathrm{out}}{\sqrt{2}\,\Delta R}\right).
 $$
 
 
-Vertical profile:
+The vertical shape is the potential-dependent isothermal factor $C(R,z)$.
+New models normalize its column at every radius:
 
 
 $$
-\rho(R,z) = \frac{\Sigma(R)}{2z_d}\,\mathrm{sech}^2(z/z_d).
+\rho(R,z) = \Sigma(R)\,\frac{C(R,z)}{\int C(R,z')\,dz'}.
 $$
+
+Legacy artifacts retain the original $\Sigma(R)C(R,z)/(2z_d)$ prefactor
+contract; other density corrections still apply.
+See [disk column normalization](docs/disk_column_normalization.md) for the
+central-ring failure mode, compatibility behavior, and sampling safeguards.
 
 
 The disk contributes a **non-multipole** approximate potential (`appdiskpot.f`)
@@ -629,6 +635,9 @@ The action-based disk DF is corrected iteratively (`diskdf.f`):
 2. For each radius, integrate over $(v_R, v_z, v_\phi)$ to match the imposed
    surface density and velocity dispersions.
 3. Update spline correction factors `fdrat`, `fszrat` → written to `cordbh.dat`.
+
+`fdrat` corrects `fnamidden` (the DF normalization), while `fszrat` corrects
+$\sigma_z^2$. The prescribed exponential $\sigma_R^2$ profile is unchanged.
 
 Toomre $Q$ at $R=2.5 R_d$:
 

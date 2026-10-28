@@ -158,6 +158,10 @@ def test_appdisk_subtraction_keeps_harmonic_density_nonnegative(tmp_path: Path) 
     model = preview_dbh_model(base="milky_way_disk_halo", coarse=True)
     solve_potential(model, work_dir=tmp_path, cleanup=False, backend="python")
     pot = read_harmonic_potential(tmp_path / "dbh.dat")
+    from galacticsics.potential.poisson.disk_vertical import (
+        disk_vertical_normalization_at,
+    )
+
     disk = model.disk
     assert disk is not None
     for r in (1.0, 2.5 * disk.scale_length, 5.0):
@@ -174,6 +178,7 @@ def test_appdisk_subtraction_keeps_harmonic_density_nonnegative(tmp_path: Path) 
             dens_psi_halo=lambda _e: 0.0,
             dens_psi_bulge=None,
             psic=pot.psic,
+            disk_vertical_normalization=disk_vertical_normalization_at(pot, r),
         )
         assert rho >= 0.0
 
