@@ -115,7 +115,8 @@ double rcirc_from_am(const RcircPack *rc, double am) {
     }
     if (aam > rc->am[rc->n - 1]) {
         double ratio = aam / rc->am[rc->n - 1];
-        return rc->inv_sqrt_am[rc->n - 1] * ratio * ratio;
+        double radius_last = rc->inv_sqrt_am[rc->n - 1] * sqrt(rc->am[rc->n - 1]);
+        return radius_last * ratio * ratio;
     }
     double inv_sqrt = interp1d(rc->am, rc->inv_sqrt_am, rc->n, aam);
     double rc_val = inv_sqrt * sqrt(aam);
@@ -204,7 +205,7 @@ static void legendre_even_l(double costheta, int lmax, double *p, double *dp, in
 }
 
 static double disk_surface_density(const PotPack *pot, double r) {
-    if (!pot->has_disk || r <= 0.0) {
+    if (!pot->has_disk || r < 0.0) {
         return 0.0;
     }
     /* Match appdisk.f / Python disk_surface_radial_derivatives truncation. */
@@ -304,16 +305,16 @@ double halo_density_spherical(const HaloParams *h, double r) {
 }
 
 double sigma_r2(const CorrPack *c, double r) {
-    double fd = corr_f_d(c, r);
-    if (fd < 1e-6) {
-        fd = 1e-6;
-    }
-    return c->sigma_r0 * c->sigma_r0 * exp(-r / c->sigma_r_scale) * fd;
+    /* sigr2.f prescribes sigma_R independently of f_d.  f_d corrects only
+       the DF normalization through fnamidden. */
+    return c->sigma_r0 * c->sigma_r0 * exp(-r / c->sigma_r_scale);
 }
 
 double sigma_z2(const PotPack *pot, const CorrPack *c, double r) {
     double zdisk = pot->disk_scale_height;
-    double psizh = pot_eval(pot, r, 3.0 * zdisk);
+    /* sigz2.f anchors sech^2(z/z_d) at z=z_d (sech^2(1)=0.419974).
+       The 3*z_d sample is used only by the disk-density ansatz. */
+    double psizh = pot_eval(pot, r, zdisk);
     double psi00 = pot_eval(pot, r, 0.0);
     double fsz = corr_f_sz(c, r);
     double base = (psizh - psi00) / log(0.419974);
@@ -344,8 +345,14 @@ static double disk_density_psi(
             con = pow(0.009866, coeff);
         }
     }
-    double f = disk_surface_density(pot, hypot(s, z));
-    return 0.5 / zdisk * f * con;
+    double f = disk_surface_density(pot, s);
+    double vertical_norm = interp1d(
+        pot->disk_vertical_norm_radii,
+        pot->disk_vertical_norm_values,
+        pot->n_disk_vertical_norm,
+        s
+    );
+    return vertical_norm * f * con;
 }
 
 double disk_midplane_density(const PotPack *pot, double r, double z) {
@@ -356,18 +363,19 @@ double disk_midplane_density(const PotPack *pot, double r, double z) {
     return disk_density_psi(pot, r, z, psi, psi_mid, psi_3zd);
 }
 
-static double diskdf3ez(
+static double log_diskdf3ez(
     double ep, double am, double ez, double r,
     const PotPack *pot, const FreqPack *freq, const CorrPack *corr, const RcircPack *rcirc
 ) {
+    (void)r;
     double rc = rcirc_from_am(rcirc, am);
     if (rc <= 0.0) {
-        return 0.0;
+        return -INFINITY;
     }
     double omega = freq_omega(freq, rc);
     double kappa = freq_kappa(freq, rc);
     if (kappa <= 0.0 || omega <= 0.0) {
-        return 0.0;
+        return -INFINITY;
     }
     double vc = rc * omega;
     double psir0 = pot_eval(pot, rc, 0.0);
@@ -378,17 +386,33 @@ static double diskdf3ez(
         ec = -2.0 * psi00 - ec;
     }
     double f_d = corr_f_d(corr, rc);
-    double f_sz = corr_f_sz(corr, rc);
     double sr2 = sigma_r2(corr, rc);
     double sz2 = sigma_z2(pot, corr, rc);
     if (sz2 <= 0.0 || sr2 <= 0.0) {
-        return 0.0;
+        return -INFINITY;
     }
     double rho_mid = disk_midplane_density(pot, rc, 0.0) * fmax(f_d, 1e-6);
-    double fvert = rho_mid * exp(fmin(-ez / sz2, 700.0)) / sqrt(2.0 * M_PI * sz2);
-    double val = omega / (M_PI * kappa) / sr2 * exp(fmin(-(ep - ec) / sr2, 700.0)) * fvert;
-    return (val > 0.0) ? val : 0.0;
-    (void)r;
+    if (rho_mid <= 0.0) {
+        return -INFINITY;
+    }
+    return log(omega)
+        - log(M_PI * kappa)
+        - log(sr2)
+        + log(rho_mid)
+        - ez / sz2
+        - 0.5 * log(2.0 * M_PI * sz2)
+        - (ep - ec) / sr2;
+}
+
+static double diskdf3ez(
+    double ep, double am, double ez, double r,
+    const PotPack *pot, const FreqPack *freq, const CorrPack *corr, const RcircPack *rcirc
+) {
+    double log_value = log_diskdf3ez(ep, am, ez, r, pot, freq, corr, rcirc);
+    if (!isfinite(log_value) || log_value < -745.0) {
+        return 0.0;
+    }
+    return exp(fmin(log_value, 700.0));
 }
 
 double diskdf5ez(
@@ -403,31 +427,83 @@ double diskdf5ez(
     return diskdf3ez(ep, am, ez, r, pot, freq, corr, rcirc);
 }
 
+static double log_diskdf5ez(
+    double vr, double vt, double vz, double r, double z,
+    const PotPack *pot, const FreqPack *freq, const CorrPack *corr, const RcircPack *rcirc
+) {
+    double psir0 = pot_eval(pot, r, 0.0);
+    double psirz = (z == 0.0) ? psir0 : pot_eval(pot, r, z);
+    double ep = 0.5 * (vr * vr + vt * vt) - psir0;
+    double am = r * vt;
+    double ez = 0.5 * vz * vz - psirz + psir0;
+    return log_diskdf3ez(ep, am, ez, r, pot, freq, corr, rcirc);
+}
+
 double find_fmax(
     double vpmax, double r, double z,
     const PotPack *pot, const FreqPack *freq, const CorrPack *corr, const RcircPack *rcirc,
-    double vsigp
+    double vsigp, double *vphi_mode
 ) {
-    double dv = 0.1 * vsigp;
-    double v0 = vpmax - dv;
-    double v1 = vpmax + dv;
-    double f0 = diskdf5ez(0.0, v0, 0.0, r, z, pot, freq, corr, rcirc);
-    double fmid = diskdf5ez(0.0, vpmax, 0.0, r, z, pot, freq, corr, rcirc);
-    double f1 = diskdf5ez(0.0, v1, 0.0, r, z, pot, freq, corr, rcirc);
-    if (fmid >= f0 && fmid >= f1 && fmid > 0.0) {
-        return fmid;
+    if (vsigp <= 0.0) {
+        *vphi_mode = vpmax;
+        return diskdf5ez(0.0, vpmax, 0.0, r, z, pot, freq, corr, rcirc);
     }
-    double fmax = f0;
-    double vmax = v0;
-    for (int i = 0; i <= 100; i++) {
-        double v = v0 + i * 2.0 * dv;
-        double f = diskdf5ez(0.0, v, 0.0, r, z, pot, freq, corr, rcirc);
-        if (f > fmax) {
-            fmax = f;
-            vmax = v;
+    double best_log = -INFINITY;
+    int best_i = 0;
+    for (int i = 0; i <= 32; i++) {
+        double offset = -8.0 + 0.5 * (double)i;
+        double v = vpmax + offset * vsigp;
+        double log_f = log_diskdf5ez(0.0, v, 0.0, r, z, pot, freq, corr, rcirc);
+        if (log_f > best_log) {
+            best_log = log_f;
+            best_i = i;
         }
     }
-    return diskdf5ez(0.0, vmax, 0.0, r, z, pot, freq, corr, rcirc);
+    double center = -8.0 + 0.5 * (double)best_i;
+    double best_offset = center;
+    double lo = fmax(-8.0, center - 0.5);
+    double hi = fmin(8.0, center + 0.5);
+    const double golden = 0.6180339887498948482;
+    double left = hi - golden * (hi - lo);
+    double right = lo + golden * (hi - lo);
+    double log_left = log_diskdf5ez(
+        0.0, vpmax + left * vsigp, 0.0, r, z, pot, freq, corr, rcirc
+    );
+    double log_right = log_diskdf5ez(
+        0.0, vpmax + right * vsigp, 0.0, r, z, pot, freq, corr, rcirc
+    );
+    for (int i = 0; i < 32; i++) {
+        if (log_left < log_right) {
+            lo = left;
+            left = right;
+            log_left = log_right;
+            right = lo + golden * (hi - lo);
+            log_right = log_diskdf5ez(
+                0.0, vpmax + right * vsigp, 0.0, r, z, pot, freq, corr, rcirc
+            );
+        } else {
+            hi = right;
+            right = left;
+            log_right = log_left;
+            left = hi - golden * (hi - lo);
+            log_left = log_diskdf5ez(
+                0.0, vpmax + left * vsigp, 0.0, r, z, pot, freq, corr, rcirc
+            );
+        }
+    }
+    if (log_left > best_log) {
+        best_log = log_left;
+        best_offset = left;
+    }
+    if (log_right > best_log) {
+        best_log = log_right;
+        best_offset = right;
+    }
+    *vphi_mode = vpmax + best_offset * vsigp;
+    if (!isfinite(best_log) || best_log < -745.0) {
+        return 0.0;
+    }
+    return exp(fmin(best_log, 700.0));
 }
 
 /* --- OpenMP samplers --- */
@@ -499,6 +575,12 @@ int sample_halo_omp(
         int local_attempts = 0;
 
         while (1) {
+            int failure_code;
+#pragma omp atomic read
+            failure_code = failed;
+            if (failure_code != 0) {
+                break;
+            }
             int slot;
 #pragma omp atomic read
             slot = accepted;
@@ -508,7 +590,7 @@ int sample_halo_omp(
             if (local_attempts >= max_attempts) {
 #pragma omp critical
                 {
-                    failed = 1;
+                    if (failed == 0) failed = 1;
                 }
                 break;
             }
@@ -618,7 +700,8 @@ int sample_disk_omp(
     const FreqPack *freq,
     const CorrPack *corr,
     const RcircPack *rcirc,
-    const SamplerOpts *opts
+    const SamplerOpts *opts,
+    double failure_detail[4]
 ) {
     int n_threads = opts->n_threads;
 #ifdef _OPENMP
@@ -642,6 +725,12 @@ int sample_disk_omp(
         int local_attempts = 0;
 
         while (1) {
+            int failure_code;
+#pragma omp atomic read
+            failure_code = failed;
+            if (failure_code != 0) {
+                break;
+            }
             int slot;
 #pragma omp atomic read
             slot = accepted;
@@ -651,7 +740,11 @@ int sample_disk_omp(
             if (local_attempts >= max_attempts) {
 #pragma omp critical
                 {
-                    failed = 1;
+                    if (failed == 0) {
+                        failed = 1;
+                        failure_detail[0] = (double)accepted;
+                        failure_detail[1] = (double)local_attempts;
+                    }
                 }
                 break;
             }
@@ -668,6 +761,19 @@ int sample_disk_omp(
             }
             double rhoguess = exp(-r_try / rd) / pow(cosh(z_try / zd), 2.0);
             double rhotst = disk_midplane_density(pot, r_try, z_try) / fmax(rhoguess, 1e-30);
+            if (rhotst > rhomax * (1.0 + 1.0e-10)) {
+#pragma omp critical
+                {
+                    if (failed == 0) {
+                        failed = 2;
+                        failure_detail[0] = r_try;
+                        failure_detail[1] = z_try;
+                        failure_detail[2] = rhotst;
+                        failure_detail[3] = rhomax;
+                    }
+                }
+                break;
+            }
             if (rhotst < rhomin || (rhomax - rhomin) * sampler_rng_uniform(&rng) > rhotst) {
                 continue;
             }
@@ -681,14 +787,27 @@ int sample_disk_omp(
             double vsigR = sqrt(sigma_r2(corr, r_try));
             double vsigp = (omega > 0.0) ? kappa / (2.0 * omega) * vsigR : 0.0;
             double vsigz = sqrt(sigma_z2(pot, corr, r_try));
-            double fmax = 1.1 * find_fmax(vphimax, r_try, z_try, pot, freq, corr, rcirc, vsigp);
+            double vphi_mode = vphimax;
+            double fmax = 2.0 * find_fmax(
+                vphimax, r_try, z_try, pot, freq, corr, rcirc, vsigp, &vphi_mode
+            );
             if (fmax <= 0.0) {
-                continue;
+                /* Resampling the position here biases the disk surface density. */
+#pragma omp critical
+                {
+                    if (failed == 0) {
+                        failed = 3;
+                        failure_detail[0] = r_try;
+                        failure_detail[1] = z_try;
+                        failure_detail[2] = fmax;
+                    }
+                }
+                break;
             }
 
             int vel_ok = 0;
             double vR = 0.0, vp = 0.0, vz = 0.0;
-            for (int k = 0; k < 200; k++) {
+            for (int k = 0; k < 20000; k++) {
                 double gr = 8.0 * (sampler_rng_uniform(&rng) - 0.5);
                 double gp = 16.0 * (sampler_rng_uniform(&rng) - 0.5);
                 double gz = 8.0 * (sampler_rng_uniform(&rng) - 0.5);
@@ -696,16 +815,39 @@ int sample_disk_omp(
                     continue;
                 }
                 vR = vsigR * gr;
-                vp = vphimax + vsigp * gp;
+                vp = vphi_mode + vsigp * gp;
                 vz = vsigz * gz;
                 double f0 = diskdf5ez(vR, vp, vz, r_try, z_try, pot, freq, corr, rcirc);
+                if (f0 > fmax * (1.0 + 1.0e-10)) {
+#pragma omp critical
+                    {
+                        if (failed == 0) {
+                            failed = 4;
+                            failure_detail[0] = r_try;
+                            failure_detail[1] = z_try;
+                            failure_detail[2] = f0;
+                            failure_detail[3] = fmax;
+                        }
+                    }
+                    break;
+                }
                 if (fmax * sampler_rng_uniform(&rng) <= f0) {
                     vel_ok = 1;
                     break;
                 }
             }
             if (!vel_ok) {
-                continue;
+#pragma omp critical
+                {
+                    if (failed == 0) {
+                        failed = 5;
+                        failure_detail[0] = r_try;
+                        failure_detail[1] = z_try;
+                        failure_detail[2] = fmax;
+                        failure_detail[3] = vphi_mode;
+                    }
+                }
+                break;
             }
 
             /* Cylindrical (vR, vφ, vz) → Cartesian (vx, vy, vz); matches halo path. */
@@ -736,8 +878,11 @@ int sample_disk_omp(
         }
     }
 
-    if (failed || accepted < n_particles) {
-        return -1;
+    if (failed) {
+        return -failed;
+    }
+    if (accepted < n_particles) {
+        return -6;
     }
     if (opts->center) {
         center_particles(out, n_particles);

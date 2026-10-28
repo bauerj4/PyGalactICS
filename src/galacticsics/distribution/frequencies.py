@@ -43,14 +43,17 @@ class FrequencyTable:
 
     def omega(self, r: float) -> float:
         """Circular frequency ``v_circ / R`` from the total midplane potential."""
-        return float(self._omega_spline(r))
+        radius = float(np.clip(r, self.radius[0], self.radius[-1]))
+        return float(self._omega_spline(radius))
 
     def omega_halo(self, r: float) -> float:
         """Halo-only circular frequency (``getfreqs`` column ``OMEGA_H``)."""
-        return float(self._omega_halo_spline(r))
+        radius = float(np.clip(r, self.radius[0], self.radius[-1]))
+        return float(self._omega_halo_spline(radius))
 
     def kappa(self, r: float) -> float:
-        return float(self._kappa_spline(r))
+        radius = float(np.clip(r, self.radius[0], self.radius[-1]))
+        return float(self._kappa_spline(radius))
 
     @classmethod
     def from_omekap_file(cls, path: PathLike) -> FrequencyTable:

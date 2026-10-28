@@ -9,7 +9,11 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 from galacticsics.io import read_harmonic_potential
-from galacticsics.io.formats import read_disk_correction, read_frequency_table
+from galacticsics.io.formats import (
+    cordbh_is_valid,
+    read_disk_correction,
+    read_frequency_table,
+)
 from galacticsics.potential.evaluate import evaluate_potential
 from galacticsics.potential.harmonics import HarmonicPotential
 
@@ -60,6 +64,15 @@ def pack_potential(pot: HarmonicPotential) -> dict:
     disk_zd = disk.scale_height if disk is not None else 1.0
     disk_rtrunc = disk.outer_radius if disk is not None else 0.0
     disk_trunc_width = disk.trunc_width if disk is not None else 1.0
+    if has_disk:
+        from galacticsics.potential.poisson.disk_vertical import (
+            cached_disk_vertical_normalization,
+        )
+
+        disk_norm_radii, disk_norm_values = cached_disk_vertical_normalization(pot)
+    else:
+        disk_norm_radii = np.array([0.0], dtype=np.float64)
+        disk_norm_values = np.array([0.0], dtype=np.float64)
     return {
         "apot": np.ascontiguousarray(pot.apot[: pot.n_harmonics, :], dtype=np.float64),
         "plcon": _plcon_array(pot),
@@ -75,6 +88,12 @@ def pack_potential(pot: HarmonicPotential) -> dict:
         "disk_scale_height": float(disk_zd),
         "disk_rtrunc": float(disk_rtrunc),
         "disk_trunc_width": float(disk_trunc_width),
+        "disk_vertical_norm_radii": np.ascontiguousarray(
+            disk_norm_radii, dtype=np.float64
+        ),
+        "disk_vertical_norm_values": np.ascontiguousarray(
+            disk_norm_values, dtype=np.float64
+        ),
     }
 
 
@@ -144,6 +163,10 @@ def pack_halo_context(work_dir: Path) -> dict:
 
 def pack_disk_context(work_dir: Path) -> dict:
     work_dir = Path(work_dir)
+    if not cordbh_is_valid(work_dir / "cordbh.dat"):
+        raise RuntimeError(
+            "invalid disk DF correction table; rerun diskdf before sampling"
+        )
     pot = read_harmonic_potential(work_dir / "dbh.dat")
     freq = read_frequency_table(work_dir / "freqdbh.dat")
     corr = read_disk_correction(work_dir / "cordbh.dat")
@@ -155,17 +178,23 @@ def pack_disk_context(work_dir: Path) -> dict:
     zd = 1.2 * disk.scale_height
     rtrunc = disk.outer_radius + 2 * disk.trunc_width
 
-    from galacticsics.distribution.diskdf_solve import _disk_midplane_density
+    from galacticsics.sampling.disk_envelope import disk_rejection_envelope
 
-    r_grid = np.linspace(0.0, rtrunc, 50)
-    rhoguess = np.exp(-r_grid / rd)
-    rhotst = np.array(
-        [_disk_midplane_density(float(r), 0.0, pot) / max(g, 1e-30) for r, g in zip(r_grid, rhoguess)]
+    rhomax, rhomin = disk_rejection_envelope(
+        pot,
+        radial_limit=rtrunc,
+        proposal_scale_length=rd,
+        proposal_scale_height=zd,
     )
-    rhomax = float(rhotst.max()) * 1.2
-    rhomin = 1e-10 * rhomax
 
-    freq_r, freq_o, freq_k = _dense_freq_table(freq, rtrunc)
+    # A velocity proposal at R <= rtrunc can have a guiding-centre radius well
+    # outside rtrunc.  Packing frequencies only to the position cutoff clamps
+    # Omega/kappa there and can manufacture enormous, spurious outer-disk DF
+    # peaks.  Cover the full solved frequency grid, at no coarser than its
+    # native radial sampling.
+    freq_limit = float(freq.radius[-1])
+    freq_n = max(512, int(freq.radius.size))
+    freq_r, freq_o, freq_k = _dense_freq_table(freq, freq_limit, n=freq_n)
     corr_r, corr_fd, corr_fsz = _dense_corr_table(corr, rtrunc)
     rcirc_am, rcirc_inv = _pack_rcirc_table(pot, freq)
 

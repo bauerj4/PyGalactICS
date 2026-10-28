@@ -9,6 +9,7 @@
 
 #include <Python.h>
 #include <numpy/arrayobject.h>
+#include <stdio.h>
 
 static int get_required_double(PyObject *dict, const char *key, double *out) {
     PyObject *val = PyDict_GetItemString(dict, key);
@@ -54,7 +55,12 @@ static PyArrayObject *get_required_array(PyObject *dict, const char *key, int nd
 }
 
 static int fill_pot_pack(
-    PyObject *pack, PotPack *pot, PyArrayObject **apot_out, PyArrayObject **plcon_out
+    PyObject *pack,
+    PotPack *pot,
+    PyArrayObject **apot_out,
+    PyArrayObject **plcon_out,
+    PyArrayObject **disk_norm_radii_out,
+    PyArrayObject **disk_norm_values_out
 ) {
     PyArrayObject *apot = get_required_array(pack, "apot", 2);
     PyArrayObject *plcon = get_required_array(pack, "plcon", 1);
@@ -81,9 +87,53 @@ static int fill_pot_pack(
     }
     pot->apot = (const double *)PyArray_DATA(apot);
     pot->plcon = (const double *)PyArray_DATA(plcon);
+    if (pot->has_disk) {
+        PyArrayObject *norm_radii = get_required_array(
+            pack, "disk_vertical_norm_radii", 1
+        );
+        PyArrayObject *norm_values = get_required_array(
+            pack, "disk_vertical_norm_values", 1
+        );
+        if (!norm_radii || !norm_values) {
+            Py_XDECREF(norm_radii);
+            Py_XDECREF(norm_values);
+            Py_DECREF(apot);
+            Py_DECREF(plcon);
+            return -1;
+        }
+        if (PyArray_DIM(norm_radii, 0) != PyArray_DIM(norm_values, 0)
+            || PyArray_DIM(norm_radii, 0) < 1) {
+            Py_DECREF(norm_radii);
+            Py_DECREF(norm_values);
+            Py_DECREF(apot);
+            Py_DECREF(plcon);
+            PyErr_SetString(
+                PyExc_ValueError,
+                "disk vertical normalization arrays must have equal nonzero length"
+            );
+            return -1;
+        }
+        pot->n_disk_vertical_norm = (int)PyArray_DIM(norm_radii, 0);
+        pot->disk_vertical_norm_radii = (const double *)PyArray_DATA(norm_radii);
+        pot->disk_vertical_norm_values = (const double *)PyArray_DATA(norm_values);
+        *disk_norm_radii_out = norm_radii;
+        *disk_norm_values_out = norm_values;
+    }
     *apot_out = apot;
     *plcon_out = plcon;
     return 0;
+}
+
+static void release_pot_pack_arrays(
+    PyArrayObject *apot,
+    PyArrayObject *plcon,
+    PyArrayObject *disk_norm_radii,
+    PyArrayObject *disk_norm_values
+) {
+    Py_XDECREF(apot);
+    Py_XDECREF(plcon);
+    Py_XDECREF(disk_norm_radii);
+    Py_XDECREF(disk_norm_values);
 }
 
 static PyObject *py_extension_available(PyObject *self, PyObject *args) {
@@ -122,7 +172,15 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     DfPack df = {0};
     PyArrayObject *apot_arr = NULL;
     PyArrayObject *plcon_arr = NULL;
-    if (fill_pot_pack(pack_obj, &pot, &apot_arr, &plcon_arr) < 0) {
+    PyArrayObject *disk_norm_radii = NULL;
+    PyArrayObject *disk_norm_values = NULL;
+    if (fill_pot_pack(
+            pack_obj,
+            &pot,
+            &apot_arr,
+            &plcon_arr,
+            &disk_norm_radii,
+            &disk_norm_values) < 0) {
         return NULL;
     }
     if (get_required_double(pack_obj, "halo_a", &halo.a) < 0
@@ -131,6 +189,9 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
         || get_required_double(pack_obj, "halo_r_outer", &halo.r_outer) < 0
         || get_required_double(pack_obj, "halo_dr_trunc", &halo.dr_trunc) < 0
         || get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
     df.psic = pot.psic;
@@ -140,6 +201,9 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     if (!df_energy || !df_log) {
         Py_XDECREF(df_energy);
         Py_XDECREF(df_log);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
     df.n = (int)PyArray_DIM(df_energy, 0);
@@ -152,6 +216,9 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     if (!out) {
         Py_DECREF(df_energy);
         Py_DECREF(df_log);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
 
@@ -162,8 +229,9 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     );
     Py_DECREF(df_energy);
     Py_DECREF(df_log);
-    Py_DECREF(apot_arr);
-    Py_DECREF(plcon_arr);
+    release_pot_pack_arrays(
+        apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+    );
     if (rc != 0) {
         Py_DECREF(out);
         PyErr_SetString(PyExc_RuntimeError, "halo sampling failed");
@@ -199,11 +267,22 @@ static PyObject *py_sample_disk(PyObject *self, PyObject *args, PyObject *kwargs
     RcircPack rcirc = {0};
     PyArrayObject *apot_arr = NULL;
     PyArrayObject *plcon_arr = NULL;
-    if (fill_pot_pack(pack_obj, &pot, &apot_arr, &plcon_arr) < 0) {
+    PyArrayObject *disk_norm_radii = NULL;
+    PyArrayObject *disk_norm_values = NULL;
+    if (fill_pot_pack(
+            pack_obj,
+            &pot,
+            &apot_arr,
+            &plcon_arr,
+            &disk_norm_radii,
+            &disk_norm_values) < 0) {
         return NULL;
     }
     if (get_required_double(pack_obj, "sigma_r0", &corr.sigma_r0) < 0
         || get_required_double(pack_obj, "sigma_r_scale", &corr.sigma_r_scale) < 0) {
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
 
@@ -224,6 +303,9 @@ static PyObject *py_sample_disk(PyObject *self, PyObject *args, PyObject *kwargs
         Py_XDECREF(freq_k);
         Py_XDECREF(rcirc_am);
         Py_XDECREF(rcirc_inv);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
     corr.n = (int)PyArray_DIM(corr_r, 0);
@@ -249,13 +331,17 @@ static PyObject *py_sample_disk(PyObject *self, PyObject *args, PyObject *kwargs
         Py_DECREF(freq_k);
         Py_DECREF(rcirc_am);
         Py_DECREF(rcirc_inv);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
 
     SamplerOpts opts = {.n_threads = n_threads, .max_attempts = max_attempts, .center = center};
+    double failure_detail[4] = {0.0, 0.0, 0.0, 0.0};
     int rc = sample_disk_omp(
         (double *)PyArray_DATA(out), n_particles, seed, mass, rd, zd, rtrunc, rhomax, rhomin,
-        &pot, &freq, &corr, &rcirc, &opts
+        &pot, &freq, &corr, &rcirc, &opts, failure_detail
     );
     Py_DECREF(corr_r);
     Py_DECREF(corr_fd);
@@ -265,11 +351,32 @@ static PyObject *py_sample_disk(PyObject *self, PyObject *args, PyObject *kwargs
     Py_DECREF(freq_k);
     Py_DECREF(rcirc_am);
     Py_DECREF(rcirc_inv);
-    Py_DECREF(apot_arr);
-    Py_DECREF(plcon_arr);
+    release_pot_pack_arrays(
+        apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+    );
     if (rc != 0) {
         Py_DECREF(out);
-        PyErr_SetString(PyExc_RuntimeError, "disk sampling failed");
+        const char *message = "disk sampling failed";
+        switch (rc) {
+            case -1: message = "disk sampling exceeded the spatial attempt limit"; break;
+            case -2: message = "disk spatial rejection envelope was exceeded"; break;
+            case -3: message = "disk velocity envelope is non-positive"; break;
+            case -4: message = "disk velocity rejection envelope was exceeded"; break;
+            case -5: message = "disk velocity sampling exceeded 20000 attempts"; break;
+            case -6: message = "disk sampler stopped before filling the output"; break;
+        }
+        char detail_message[320];
+        snprintf(
+            detail_message,
+            sizeof(detail_message),
+            "%s (detail: %.9g, %.9g, %.9g, %.9g)",
+            message,
+            failure_detail[0],
+            failure_detail[1],
+            failure_detail[2],
+            failure_detail[3]
+        );
+        PyErr_SetString(PyExc_RuntimeError, detail_message);
         return NULL;
     }
     return (PyObject *)out;
@@ -301,7 +408,15 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
     DfPack df = {0};
     PyArrayObject *apot_arr = NULL;
     PyArrayObject *plcon_arr = NULL;
-    if (fill_pot_pack(pack_obj, &pot, &apot_arr, &plcon_arr) < 0) {
+    PyArrayObject *disk_norm_radii = NULL;
+    PyArrayObject *disk_norm_values = NULL;
+    if (fill_pot_pack(
+            pack_obj,
+            &pot,
+            &apot_arr,
+            &plcon_arr,
+            &disk_norm_radii,
+            &disk_norm_values) < 0) {
         return NULL;
     }
     if (get_required_double(pack_obj, "bulge_n", &bulge.n) < 0
@@ -310,8 +425,9 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
         || get_required_double(pack_obj, "bulge_butt", &bulge.butt) < 0
         || get_required_double(pack_obj, "bulge_rho0", &bulge.rho0) < 0
         || get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
-        Py_DECREF(apot_arr);
-        Py_DECREF(plcon_arr);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
     df.psic = pot.psic;
@@ -323,8 +439,9 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
         Py_XDECREF(df_energy);
         Py_XDECREF(df_log);
         Py_XDECREF(df_fmax);
-        Py_DECREF(apot_arr);
-        Py_DECREF(plcon_arr);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
     df.n = (int)PyArray_DIM(df_energy, 0);
@@ -338,8 +455,9 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
         Py_DECREF(df_energy);
         Py_DECREF(df_log);
         Py_DECREF(df_fmax);
-        Py_DECREF(apot_arr);
-        Py_DECREF(plcon_arr);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
         return NULL;
     }
 
@@ -351,8 +469,9 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
     Py_DECREF(df_energy);
     Py_DECREF(df_log);
     Py_DECREF(df_fmax);
-    Py_DECREF(apot_arr);
-    Py_DECREF(plcon_arr);
+    release_pot_pack_arrays(
+        apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+    );
     if (rc != 0) {
         Py_DECREF(out);
         PyErr_SetString(PyExc_RuntimeError, "bulge sampling failed");

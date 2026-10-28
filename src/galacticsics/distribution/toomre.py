@@ -23,20 +23,18 @@ def toomre_reference_radius(model: GalaxyModel) -> float:
 
 
 def sigma_r_at_r(model: GalaxyModel, r: float, *, f_d: float = 1.0) -> float:
+    # Kept as a keyword for API compatibility.  GalactICS f_d corrects the DF
+    # normalization, not the prescribed radial velocity dispersion.
+    del f_d
     kin = model.disk_kinematics
-    return math.sqrt(
-        kin.sigma_r0**2 * math.exp(-r / kin.sigma_r_scale) * max(f_d, 1e-6)
-    )
+    return math.sqrt(kin.sigma_r0**2 * math.exp(-r / kin.sigma_r_scale))
 
 
 def sigma_surface_at_r(pot, r: float) -> float:
-    """Surface density estimate ``2 z_d rho(R, 0)`` matching legacy ``diskdf.f``."""
-    from galacticsics.distribution.diskdf_solve import _disk_midplane_density
+    """Requested projected disk surface density at cylindrical radius ``r``."""
+    from galacticsics.potential.poisson.densities import disk_surface_density
 
-    disk = pot.model.disk
-    assert disk is not None
-    rho_mid = _disk_midplane_density(r, 0.0, pot)
-    return rho_mid * 2.0 * disk.scale_height
+    return disk_surface_density(r, pot.model)
 
 
 def compute_toomre_q(

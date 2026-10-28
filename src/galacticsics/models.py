@@ -70,20 +70,28 @@ class NFWHalo:
 @dataclass
 class ExponentialDisk:
     """
-    Exponential/sech² stellar disk (first disk component).
+    Exponential stellar disk (first disk component).
 
-    Surface density on the midplane:
+    Projected surface density:
 
     .. math::
 
        \\Sigma(R) = \\Sigma_0 \\exp(-R/R_d)\\,
-       \\tfrac{1}{2}\\mathrm{erfc}\\!\\left(\\frac{R-R_{\\mathrm{out}}}{\\Delta R}\\right)
+       \\tfrac{1}{2}\\mathrm{erfc}\\!\\left(\\frac{R-R_{\\mathrm{out}}}{\\sqrt{2}\\,\\Delta R}\\right)
 
-    with :math:`\\Sigma_0 = M/(2\\pi R_d^2)`.  Vertical structure is
+    with :math:`\\Sigma_0 = M/(2\\pi R_d^2)`.  In ``surface_normalized`` mode,
+    the potential-dependent vertical profile is normalized at each radius:
 
     .. math::
 
-       \\rho(R,z) = \\frac{\\Sigma(R)}{2 z_d}\\mathrm{sech}^2(z/z_d).
+       \\rho(R,z) = \\Sigma(R)\\,N(R)\\,C(R,z),
+
+    where :math:`C` is the isothermal vertical-energy factor and
+    :math:`N^{-1}=\\int C\\,dz`.
+
+    ``legacy_midplane`` mode retains the original GalactICS prefactor,
+    :math:`\\rho(R,z)=\\Sigma(R)C(R,z)/(2z_d)`, whose projected column need not
+    equal :math:`\\Sigma(R)` when a bulge or halo compresses the disk.
 
     Parameters match the second interactive block in ``legacy/fortran/dbh.f``.
     """
@@ -96,11 +104,19 @@ class ExponentialDisk:
     hole_radius: float = 0.0  # rhole
     core_radius: float = 1.5  # rcore
     enabled: bool = True
+    vertical_density_mode: str = "surface_normalized"
 
     @property
     def disk_const(self) -> float:
         """Surface density normalization."""
         return self.mass / (2.0 * 3.1415926535 * self.scale_length**2)
+
+    def __post_init__(self) -> None:
+        if self.vertical_density_mode not in {"legacy_midplane", "surface_normalized"}:
+            raise ValueError(
+                "vertical_density_mode must be 'legacy_midplane' or "
+                "'surface_normalized'"
+            )
 
 
 @dataclass

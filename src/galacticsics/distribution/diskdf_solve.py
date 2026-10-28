@@ -12,13 +12,13 @@ from galacticsics.distribution.diskdf import DiskCorrectionTable
 from galacticsics.io import read_harmonic_potential
 from galacticsics.io.formats import read_frequency_table
 from galacticsics.models import GalaxyModel
-from galacticsics.numerics import natural_cubic_spline
+from galacticsics.numerics import bounded_linear_interpolator
 from galacticsics.potential.evaluate import evaluate_potential
 
 
 class _RcircInterpolator:
     """
-    Spline inversion of specific angular momentum to circular radius (``rcirc.f``).
+    Monotone inversion of specific angular momentum to circular radius (``rcirc.f``).
 
     Parameters
     ----------
@@ -40,9 +40,10 @@ class _RcircInterpolator:
             rtab[i] = 1.0 / math.sqrt(max(omega, 1e-30))
         self._amtab = amtab
         self._rtab = rtab
-        slope_inf = 1.5 * rtab[-1] / max(amtab[-1], 1e-30)
-        self._inv = natural_cubic_spline(amtab, rtab)
-        self._slope_inf = slope_inf
+        # The frequency table can change slope abruptly near the centre.  An
+        # unconstrained cubic spline overshoots there and can map Lz to a
+        # circular radius whose own angular momentum differs by factors of a
+        # few.  Linear interpolation is monotone and matches the native path.
 
     def __call__(self, am: float) -> float:
         """
@@ -62,8 +63,9 @@ class _RcircInterpolator:
         if aam <= 0.0:
             return 0.0
         if aam > self._amtab[-1]:
-            return float(self._rtab[-1] * (aam / self._amtab[-1]) ** 2)
-        rc_over_sqrt_am = float(self._inv(aam))
+            radius_last = self._rtab[-1] * math.sqrt(self._amtab[-1])
+            return float(radius_last * (aam / self._amtab[-1]) ** 2)
+        rc_over_sqrt_am = float(np.interp(aam, self._amtab, self._rtab))
         return max(rc_over_sqrt_am * math.sqrt(aam), 0.0)
 
 
@@ -108,13 +110,23 @@ def _sigma_r2_base(r: float, model: GalaxyModel) -> float:
     return kin.sigma_r0**2 * math.exp(-r / kin.sigma_r_scale)
 
 
-def _sigma_r2(r: float, model: GalaxyModel, f_d: float) -> float:
-    kin = model.disk_kinematics
-    return _sigma_r2_base(r, model) * max(f_d, 1e-6)
+def _sigma_r2(r: float, model: GalaxyModel, f_d: float | None = None) -> float:
+    """Radial dispersion from ``sigr2.f``.
+
+    ``f_d`` is accepted for call-site compatibility, but deliberately does
+    not rescale the dispersion.  In GalactICS, the radial correction table
+    multiplies ``fnamidden`` (the DF normalization) only.  Feeding it back
+    into sigma_R creates an unstable positive feedback in the diskdf solve.
+    """
+    del f_d
+    return _sigma_r2_base(r, model)
 
 
 def _sigma_z2_array(r: np.ndarray, pot, zdisk: float, f_sz: np.ndarray) -> np.ndarray:
-    psizh = np.array([evaluate_potential(pot, float(ri), 3 * zdisk) for ri in r])
+    # ``sigz2.f`` calibrates the isothermal vertical dispersion at one scale
+    # height, where sech^2(1) = 0.419974.  The 3*z_d potential sample belongs
+    # to the disk-density ansatz (sech^2(3) = 0.009866), not to sigma_z.
+    psizh = np.array([evaluate_potential(pot, float(ri), zdisk) for ri in r])
     psi00 = np.array([evaluate_potential(pot, float(ri), 0.0) for ri in r])
     base = (psizh - psi00) / math.log(0.419974)
     return np.maximum(base * f_sz, 1e-10)
@@ -133,13 +145,69 @@ def _disk_midplane_density(
     psi_3zd: float | None = None,
 ) -> float:
     from galacticsics.potential.poisson.densities import disk_density_psi
+    from galacticsics.potential.poisson.disk_vertical import disk_vertical_normalization_at
 
     psi = evaluate_potential(pot, r, z)
     if psi_mid is None:
         psi_mid = evaluate_potential(pot, r, 0.0)
     if psi_3zd is None:
         psi_3zd = evaluate_potential(pot, r, 3 * pot.model.disk.scale_height)
-    return disk_density_psi(r, z, psi, psi_mid, psi_3zd, pot.model)
+    return disk_density_psi(
+        r,
+        z,
+        psi,
+        psi_mid,
+        psi_3zd,
+        pot.model,
+        vertical_normalization=disk_vertical_normalization_at(pot, r),
+    )
+
+
+def _log_diskdf3ez(
+    ep: float,
+    am: float,
+    ez: float,
+    pot,
+    freq,
+    rcirc_fn: _RcircInterpolator,
+    spline_d,
+    spline_sz,
+) -> float:
+    """Natural logarithm of the 3D epicycle DF without underflow."""
+    disk = pot.model.disk
+    assert disk is not None
+    rc = rcirc_fn(am)
+    if rc <= 0.0:
+        return -math.inf
+    omega = freq.omega(rc)
+    kappa = freq.kappa(rc)
+    if kappa <= 0 or omega <= 0:
+        return -math.inf
+    vc = rc * omega
+    ec = -evaluate_potential(pot, rc, 0.0) + 0.5 * vc * vc
+    # Legacy diskdf3ez.f: flip binding energy for counter-rotating orbits so the
+    # epicycle DF strongly suppresses am < 0 (otherwise f is even in Lz).
+    if am < 0.0:
+        psi00 = evaluate_potential(pot, 0.0, 0.0)
+        ec = -2.0 * psi00 - ec
+    f_d = float(spline_d(rc))
+    f_sz = float(spline_sz(rc))
+    sr2 = _sigma_r2_base(rc, pot.model)
+    sz2 = _sigma_z2(rc, pot, disk.scale_height, f_sz)
+    if sz2 <= 0 or sr2 <= 0:
+        return -math.inf
+    rho_mid = _fnamidden(rc, pot, f_d)
+    if rho_mid <= 0.0:
+        return -math.inf
+    return (
+        math.log(omega)
+        - math.log(math.pi * kappa)
+        - math.log(sr2)
+        + math.log(rho_mid)
+        - ez / sz2
+        - 0.5 * math.log(2.0 * math.pi * sz2)
+        - (ep - ec) / sr2
+    )
 
 
 def _diskdf3ez(
@@ -152,53 +220,13 @@ def _diskdf3ez(
     spline_d,
     spline_sz,
 ) -> float:
-    """
-    3D epicycle DF (``diskdf3ez.f``) with legacy ``rcirc(am)`` evaluation.
-
-    Parameters
-    ----------
-    ep, am, ez : float
-        Epicycle actions / energies at the sampling point.
-    pot, freq
-        Potential and frequency tables.
-    rcirc_fn : _RcircInterpolator
-        Maps angular momentum to circular radius.
-    spline_d, spline_sz
-        Cubic splines for the running ``f_d`` / ``f_sz`` corrections.
-
-    Returns
-    -------
-    float
-        Distribution function value (non-negative).
-    """
-    disk = pot.model.disk
-    assert disk is not None
-    rc = rcirc_fn(am)
-    if rc <= 0.0:
-        return 0.0
-    omega = freq.omega(rc)
-    kappa = freq.kappa(rc)
-    if kappa <= 0 or omega <= 0:
-        return 0.0
-    vc = rc * omega
-    ec = -evaluate_potential(pot, rc, 0.0) + 0.5 * vc * vc
-    # Legacy diskdf3ez.f: flip binding energy for counter-rotating orbits so the
-    # epicycle DF strongly suppresses am < 0 (otherwise f is even in Lz).
-    if am < 0.0:
-        psi00 = evaluate_potential(pot, 0.0, 0.0)
-        ec = -2.0 * psi00 - ec
-    f_d = float(spline_d(rc))
-    f_sz = float(spline_sz(rc))
-    sr2 = _sigma_r2_base(rc, pot.model) * max(f_d, 1e-6)
-    sz2 = _sigma_z2(rc, pot, disk.scale_height, f_sz)
-    if sz2 <= 0 or sr2 <= 0:
-        return 0.0
-    fvert = _fnamidden(rc, pot, f_d) * math.exp(min(-ez / sz2, 700.0)) / math.sqrt(2 * math.pi * sz2)
-    arg = (ep - ec) / sr2
-    return max(
-        omega / (math.pi * kappa) / sr2 * math.exp(min(-arg, 700.0)) * fvert,
-        0.0,
+    """3D epicycle DF (``diskdf3ez.f``) with legacy ``rcirc(am)`` evaluation."""
+    log_value = _log_diskdf3ez(
+        ep, am, ez, pot, freq, rcirc_fn, spline_d, spline_sz
     )
+    if not math.isfinite(log_value) or log_value < -745.0:
+        return 0.0
+    return math.exp(min(log_value, 700.0))
 
 
 def _diskdf5ez(
@@ -222,6 +250,126 @@ def _diskdf5ez(
     return _diskdf3ez(ep, am, ez, pot, freq, rcirc_fn, spline_d, spline_sz)
 
 
+def _log_diskdf5ez(
+    vr: float,
+    vt: float,
+    vz: float,
+    r: float,
+    z: float,
+    pot,
+    freq,
+    rcirc_fn: _RcircInterpolator,
+    spline_d,
+    spline_sz,
+) -> float:
+    """Natural logarithm of :func:`_diskdf5ez` without underflow."""
+    psir0 = evaluate_potential(pot, r, 0.0)
+    psirz = psir0 if z == 0.0 else evaluate_potential(pot, r, z)
+    ep = 0.5 * (vr * vr + vt * vt) - psir0
+    am = r * vt
+    ez = 0.5 * vz * vz - psirz + psir0
+    return _log_diskdf3ez(
+        ep, am, ez, pot, freq, rcirc_fn, spline_d, spline_sz
+    )
+
+
+def _find_fmax_and_velocity(
+    vpmax: float,
+    r: float,
+    z: float,
+    pot,
+    freq,
+    rcirc_fn: _RcircInterpolator,
+    spline_d,
+    spline_sz,
+    vsigp: float,
+) -> tuple[float, float]:
+    """Return ``(f_max, v_phi_at_max)`` for the local velocity proposal.
+
+    Legacy ``gendisk`` recentres its azimuthal proposal on the maximum found by
+    ``FindMax``.  Returning only the height of the mode leaves the proposal at
+    the circular speed and can make cold, asymmetric-drifted disks need orders
+    of magnitude more rejection trials.
+    """
+    if vsigp <= 0.0:
+        return (
+            _diskdf5ez(
+                0.0, vpmax, 0.0, r, z, pot, freq, rcirc_fn, spline_d, spline_sz
+            ),
+            vpmax,
+        )
+
+    # A half-sigma grid is cheap compared with a failed rejection loop and is
+    # fine enough to select the correct basin before golden-section refinement.
+    coarse_offsets = np.linspace(-8.0, 8.0, 33)
+    coarse_log_values = np.asarray(
+        [
+            _log_diskdf5ez(
+                0.0,
+                vpmax + offset * vsigp,
+                0.0,
+                r,
+                z,
+                pot,
+                freq,
+                rcirc_fn,
+                spline_d,
+                spline_sz,
+            )
+            for offset in coarse_offsets
+        ]
+    )
+    best = int(np.argmax(coarse_log_values))
+    center = float(coarse_offsets[best])
+    lo = max(-8.0, center - 0.5)
+    hi = min(8.0, center + 0.5)
+    golden = 0.5 * (math.sqrt(5.0) - 1.0)
+    left = hi - golden * (hi - lo)
+    right = lo + golden * (hi - lo)
+
+    def log_at(offset: float) -> float:
+        return _log_diskdf5ez(
+            0.0,
+            vpmax + offset * vsigp,
+            0.0,
+            r,
+            z,
+            pot,
+            freq,
+            rcirc_fn,
+            spline_d,
+            spline_sz,
+        )
+
+    log_left = log_at(left)
+    log_right = log_at(right)
+    best_log = float(coarse_log_values[best])
+    best_offset = center
+    for _ in range(32):
+        if log_left < log_right:
+            lo = left
+            left = right
+            log_left = log_right
+            right = lo + golden * (hi - lo)
+            log_right = log_at(right)
+        else:
+            hi = right
+            right = left
+            log_right = log_left
+            left = hi - golden * (hi - lo)
+            log_left = log_at(left)
+    if log_left > best_log:
+        best_log = log_left
+        best_offset = left
+    if log_right > best_log:
+        best_log = log_right
+        best_offset = right
+    vphi_at_max = vpmax + best_offset * vsigp
+    if not math.isfinite(best_log) or best_log < -745.0:
+        return 0.0, vphi_at_max
+    return math.exp(min(best_log, 700.0)), vphi_at_max
+
+
 def _find_fmax(
     vpmax: float,
     r: float,
@@ -233,22 +381,19 @@ def _find_fmax(
     spline_sz,
     vsigp: float,
 ) -> float:
-    """Approximate local DF maximum in ``v_phi`` (``FindMax1`` in ``gendisk.c``)."""
-    dv = 0.1 * vsigp
-    v0 = vpmax - dv
-    v1 = vpmax + dv
-    f0 = _diskdf5ez(0.0, v0, 0.0, r, z, pot, freq, rcirc_fn, spline_d, spline_sz)
-    fmid = _diskdf5ez(0.0, vpmax, 0.0, r, z, pot, freq, rcirc_fn, spline_d, spline_sz)
-    f1 = _diskdf5ez(0.0, v1, 0.0, r, z, pot, freq, rcirc_fn, spline_d, spline_sz)
-    if fmid >= f0 and fmid >= f1 and fmid > 0.0:
-        return fmid
-    vmax = v0 + dv * np.argmax(
-        [
-            _diskdf5ez(0.0, v0 + i * 2 * dv, 0.0, r, z, pot, freq, rcirc_fn, spline_d, spline_sz)
-            for i in range(101)
-        ]
+    """Compatibility wrapper returning only the local DF maximum."""
+    fmax, _ = _find_fmax_and_velocity(
+        vpmax,
+        r,
+        z,
+        pot,
+        freq,
+        rcirc_fn,
+        spline_d,
+        spline_sz,
+        vsigp,
     )
-    return _diskdf5ez(0.0, vmax, 0.0, r, z, pot, freq, rcirc_fn, spline_d, spline_sz)
+    return fmax
 
 
 def _diskdf3intez(
@@ -284,7 +429,7 @@ def _diskdf3intez(
         ec = -2.0 * psi00 - ec
     f_d = float(spline_d(rc))
     f_sz = float(spline_sz(rc))
-    sr2 = _sigma_r2_base(rc, pot.model) * max(f_d, 1e-6)
+    sr2 = _sigma_r2_base(rc, pot.model)
     sz2 = _sigma_z2(rc, pot, disk.scale_height, f_sz)
     if sz2 <= 0 or sr2 <= 0:
         return 0.0
@@ -411,8 +556,8 @@ def solve_diskdf_python(
     rr = np.linspace(0.0, drspl * nrspl, nrspl + 1)
     fdrat = np.ones(nrspl + 1, dtype=float)
     fszrat = np.ones(nrspl + 1, dtype=float)
-    spline_d = natural_cubic_spline(rr, fdrat)
-    spline_sz = natural_cubic_spline(rr, fszrat)
+    spline_d = bounded_linear_interpolator(rr, fdrat)
+    spline_sz = bounded_linear_interpolator(rr, fszrat)
     rcirc_fn = _RcircInterpolator(pot, freq)
 
     zdisk = disk.scale_height
@@ -467,10 +612,20 @@ def solve_diskdf_python(
                 drat[ir2] = d0r
                 dz2rat[ir2] = dz2r
 
-        ratio = np.maximum(drat / np.maximum(dz2rat, 1e-30), 1e-30)
         dens_ratio = np.maximum(rho0, 1e-30) / np.maximum(rhoz, 1e-30)
+        # Legacy diskdf.f uses log(d0 / dz2), not the ratio of the two
+        # density residuals.  Dividing drat by dz2rat introduces a second
+        # factor of rho(z_d)/rho(0), drives f_sz to its floor, and produces
+        # needle-like, numerically unsampleable velocity DFs.
+        integrated_ratio = np.maximum(
+            (drat / np.maximum(dz2rat, 1e-30)) * dens_ratio,
+            1e-30,
+        )
         fzrat = np.ones_like(drat)
-        fzrat[active] = np.log(dens_ratio[active]) / np.maximum(np.log(ratio[active]), 1e-30)
+        fzrat[active] = np.log(dens_ratio[active]) / np.maximum(
+            np.log(integrated_ratio[active]),
+            1e-30,
+        )
         old_fd = fdrat.copy()
         old_sz = fszrat.copy()
         target_fd = old_fd.copy()
@@ -487,8 +642,8 @@ def solve_diskdf_python(
         fszrat = np.clip(fszrat, 1e-3, 1e3)
         fdrat[0] = 1.0
         fszrat[0] = 1.0
-        spline_d = natural_cubic_spline(rr, fdrat)
-        spline_sz = natural_cubic_spline(rr, fszrat)
+        spline_d = bounded_linear_interpolator(rr, fdrat)
+        spline_sz = bounded_linear_interpolator(rr, fszrat)
 
     cordbh = work_dir / "cordbh.dat"
     lines = [f"# {kin.sigma_r0:17.7f} {kin.sigma_r_scale:17.7f} {nrspl}"]

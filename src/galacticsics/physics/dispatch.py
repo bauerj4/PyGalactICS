@@ -8,6 +8,21 @@ from pathlib import Path
 from galacticsics.models import GalaxyModel
 from galacticsics.physics.backend import PhysicsBackendKind, resolve_physics_backend
 
+
+def _require_legacy_compatible_disk(model: GalaxyModel) -> None:
+    disk = model.disk
+    if (
+        disk is not None
+        and disk.enabled
+        and disk.vertical_density_mode == "surface_normalized"
+    ):
+        raise ValueError(
+            "surface_normalized disk ICs require physics_backend='python'; "
+            "the legacy Fortran dbh/diskdf/gendisk path implements only "
+            "legacy_midplane normalization"
+        )
+
+
 def backend_solve_potential(
     model: GalaxyModel,
     work_dir: Path,
@@ -15,13 +30,14 @@ def backend_solve_potential(
     backend: PhysicsBackendKind | str | None = None,
     npsi: int = 1000,
     nint: int = 20,
-    max_iter: int = 100,
+    max_iter: int | None = None,
     n_workers: int | None = None,
     timeout: float | None = 3600.0,
     stream_output: bool = False,
 ) -> None:
     kind = resolve_physics_backend(backend)
     if kind == PhysicsBackendKind.LEGACY:
+        _require_legacy_compatible_disk(model)
         from galacticsics.physics import legacy_backend
 
         legacy_backend.legacy_solve_potential(
@@ -58,6 +74,7 @@ def backend_ensure_disk_df(
 ) -> GalaxyModel:
     kind = resolve_physics_backend(backend)
     if kind == PhysicsBackendKind.LEGACY:
+        _require_legacy_compatible_disk(model)
         from galacticsics.physics import legacy_backend
 
         legacy_backend.legacy_ensure_disk_df(model, work_dir, stream_output=stream_output)
@@ -83,6 +100,11 @@ def backend_sample_disk(
 ):
     kind = resolve_physics_backend(backend)
     if kind == PhysicsBackendKind.LEGACY:
+        from galacticsics.io import read_harmonic_potential
+
+        _require_legacy_compatible_disk(
+            read_harmonic_potential(Path(work_dir) / "dbh.dat").model
+        )
         from galacticsics.physics import legacy_backend
 
         return legacy_backend.legacy_sample_disk(work_dir, config, stream_output=stream_output)

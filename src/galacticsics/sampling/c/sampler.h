@@ -27,6 +27,9 @@ typedef struct {
     double disk_trunc_width;
     const double *apot;   /* n_harm * (nr+1), row-major l then r */
     const double *plcon;  /* n_harm */
+    int n_disk_vertical_norm;
+    const double *disk_vertical_norm_radii;
+    const double *disk_vertical_norm_values;
 } PotPack;
 
 typedef struct {
@@ -109,7 +112,7 @@ double diskdf5ez(
 double find_fmax(
     double vpmax, double r, double z,
     const PotPack *pot, const FreqPack *freq, const CorrPack *corr, const RcircPack *rcirc,
-    double vsigp
+    double vsigp, double *vphi_mode
 );
 
 int sample_halo_omp(
@@ -141,7 +144,8 @@ int sample_disk_omp(
     const FreqPack *freq,
     const CorrPack *corr,
     const RcircPack *rcirc,
-    const SamplerOpts *opts
+    const SamplerOpts *opts,
+    double failure_detail[4]
 );
 
 int sample_bulge_omp(

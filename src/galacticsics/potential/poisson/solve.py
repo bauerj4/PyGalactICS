@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -131,6 +132,8 @@ def _fill_density_harmonics_at_shells(
     n_workers: int,
     halo_psi_tables: tuple[np.ndarray, np.ndarray, float] | None,
     bulge_psi_tables: tuple[np.ndarray, np.ndarray, float, float] | None,
+    disk_vertical_norm_radii: np.ndarray,
+    disk_vertical_norm_values: np.ndarray,
 ) -> None:
     """
     Accumulate density harmonics for one Poisson iteration.
@@ -176,6 +179,8 @@ def _fill_density_harmonics_at_shells(
         n_workers=n_workers,
         halo_psi_tables=halo_psi_tables,
         bulge_psi_tables=bulge_psi_tables,
+        disk_vertical_norm_radii=disk_vertical_norm_radii,
+        disk_vertical_norm_values=disk_vertical_norm_values,
     )
 
 
@@ -570,7 +575,7 @@ def solve_poisson_python(
     *,
     npsi: int = 1000,
     nint: int = 20,
-    max_iter: int = 100,
+    max_iter: int | None = None,
     n_workers: int | None = None,
 ) -> HarmonicPotential:
     """
@@ -589,7 +594,9 @@ def solve_poisson_python(
         DF table resolution passed to
         :func:`~galacticsics.potential.poisson.df_tables.write_df_artifacts`.
     max_iter : int, optional
-        Upper bound on Poisson iteration count (auto-scaled for coarse grids).
+        Upper bound on Poisson iteration count.  When omitted, normalized
+        disks use 300 iterations and legacy/coarse solves retain the existing
+        auto-scaled cap.  An explicit cap is always honored.
     n_workers : int, optional
         Thread pool size for radial shell integration (``0`` = serial).  Falls
         back to ``GALACTICSICS_SOLVE_WORKERS`` when omitted.
@@ -637,7 +644,23 @@ def solve_poisson_python(
     assert halo is not None
     if has_disk:
         assert model.disk is not None
-    max_iter = _scaled_max_iter(n_radial_shells, max_harmonic_degree, max_iter)
+    surface_normalized_disk = (
+        has_disk
+        and model.disk is not None
+        and model.disk.vertical_density_mode == "surface_normalized"
+    )
+    max_iter_was_explicit = max_iter is not None
+    if max_iter is None:
+        max_iter = 300 if surface_normalized_disk else 100
+    if max_iter <= 0:
+        raise ValueError("max_iter must be positive")
+    if surface_normalized_disk:
+        # The column normalization is part of the fixed point.  The old
+        # coarse-grid iteration cap was tuned for the tidal radius alone and
+        # can stop while the central column is still moving by several percent.
+        max_iter = int(max_iter)
+    else:
+        max_iter = _scaled_max_iter(n_radial_shells, max_harmonic_degree, max_iter)
 
     (
         reference_potential,
@@ -721,8 +744,19 @@ def solve_poisson_python(
     previous_active_lmax = -2
     previous_tidal_radius = 1e10
     tidal_radius_change = 2 * radial_step
-    potential_relaxation_factor = 0.75
+    potential_relaxation_factor = (
+        0.97
+        if model.disk is not None
+        and model.disk.enabled
+        and model.disk.vertical_density_mode == "surface_normalized"
+        else 0.75
+    )
     tidal_radius = halo.r_outer
+    pending_disk_norm: tuple[np.ndarray, np.ndarray] | None = None
+    pending_disk_norm_lmax: int | None = None
+    disk_norm_change = math.inf
+    disk_norm_change_radius = math.nan
+    disk_norm_change_surface_fraction = math.nan
 
     for iteration in range(max_iter):
         if active_lmax == 0 or active_lmax == max_harmonic_degree:
@@ -734,6 +768,17 @@ def solve_poisson_python(
             break
         arrays.lmax_active = active_lmax
         n_polar_nodes = _scaled_polar_node_count(active_lmax, n_radial_shells)
+
+        from galacticsics.potential.poisson.disk_vertical import (
+            disk_vertical_normalization_table,
+        )
+
+        if pending_disk_norm is None or pending_disk_norm_lmax != active_lmax:
+            disk_norm_radii, disk_norm_values = disk_vertical_normalization_table(
+                arrays, model
+            )
+        else:
+            disk_norm_radii, disk_norm_values = pending_disk_norm
 
         density_harmonics.fill(0.0)
 
@@ -751,6 +796,8 @@ def solve_poisson_python(
             n_workers=workers,
             halo_psi_tables=halo_psi_tables,
             bulge_psi_tables=bulge_psi_tables,
+            disk_vertical_norm_radii=disk_norm_radii,
+            disk_vertical_norm_values=disk_norm_values,
         )
 
         potential_new, force_new, force_second_new = poisson_harmonics_from_density(
@@ -771,6 +818,39 @@ def solve_poisson_python(
         arrays.apot[0, :] = (
             arrays.apot[0, :] + reference_potential * math.sqrt(4 * math.pi) - monopole_at_origin
         )
+
+        next_norm_radii, next_norm_values = disk_vertical_normalization_table(
+            arrays, model
+        )
+        if next_norm_radii.shape != disk_norm_radii.shape or not np.allclose(
+            next_norm_radii, disk_norm_radii
+        ):
+            raise RuntimeError("disk vertical normalization grid changed during solve")
+        if model.disk and model.disk.enabled:
+            from galacticsics.potential.poisson.densities import disk_surface_density_array
+
+            sigma = disk_surface_density_array(disk_norm_radii, model)
+            active_sigma = sigma > max(float(np.max(sigma)) * 1.0e-10, 0.0)
+            if np.any(active_sigma):
+                relative_change = np.abs(
+                    next_norm_values / np.maximum(disk_norm_values, 1.0e-30)
+                    - 1.0
+                )
+                active_indices = np.flatnonzero(active_sigma)
+                worst_index = int(
+                    active_indices[np.argmax(relative_change[active_sigma])]
+                )
+                disk_norm_change = float(relative_change[worst_index])
+                disk_norm_change_radius = float(disk_norm_radii[worst_index])
+                disk_norm_change_surface_fraction = float(
+                    sigma[worst_index] / max(float(np.max(sigma)), 1.0e-30)
+                )
+            else:
+                disk_norm_change = 0.0
+        else:
+            disk_norm_change = 0.0
+        pending_disk_norm = (next_norm_radii, next_norm_values)
+        pending_disk_norm_lmax = active_lmax
 
         potential_at_shell = reference_potential
         tidal_radius = halo.r_outer
@@ -795,8 +875,30 @@ def solve_poisson_python(
             tidal_radius_change = 2 * radial_step
 
         previous_active_lmax = active_lmax
-        if active_lmax >= max_harmonic_degree and tidal_radius_change < radial_step:
+        if (
+            active_lmax >= max_harmonic_degree
+            and tidal_radius_change < radial_step
+            and disk_norm_change < 1.0e-3
+        ):
             break
+
+    if (
+        model.disk is not None
+        and model.disk.enabled
+        and model.disk.vertical_density_mode == "surface_normalized"
+        and disk_norm_change >= 1.0e-3
+    ):
+        message = (
+            "disk vertical normalization did not converge within "
+            f"{max_iter} Poisson iterations (max relative change "
+            f"{disk_norm_change:.3e} at R={disk_norm_change_radius:g}, "
+            "Sigma/Sigma_max="
+            f"{disk_norm_change_surface_fraction:.3e})"
+        )
+        if max_iter_was_explicit:
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+        else:
+            raise RuntimeError(message)
 
     arrays.lmax_active = max_harmonic_degree
     total_mass = arrays.fr[0, n_radial_shells] / math.sqrt(4 * math.pi) * (radial_step * n_radial_shells) ** 2

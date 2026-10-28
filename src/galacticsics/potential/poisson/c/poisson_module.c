@@ -71,7 +71,17 @@ static PyArrayObject *get_optional_array(PyObject *dict, const char *key, int nd
     return get_required_array(dict, key, ndim);
 }
 
-static int fill_poisson_pack(PyObject *pack_obj, PoissonPack *pack, PyArrayObject **apot_out) {
+static int fill_poisson_pack(
+    PyObject *pack_obj,
+    PoissonPack *pack,
+    PyArrayObject **apot_out,
+    PyArrayObject **disk_norm_radii_out,
+    PyArrayObject **disk_norm_values_out,
+    PyArrayObject **halo_e_out,
+    PyArrayObject **halo_d_out,
+    PyArrayObject **bulge_e_out,
+    PyArrayObject **bulge_d_out
+) {
     PyArrayObject *apot = get_required_array(pack_obj, "apot", 2);
     if (!apot) {
         return -1;
@@ -92,6 +102,29 @@ static int fill_poisson_pack(PyObject *pack_obj, PoissonPack *pack, PyArrayObjec
     *apot_out = apot;
 
     if (pack->has_disk) {
+        PyArrayObject *norm_radii = get_required_array(
+            pack_obj, "disk_vertical_norm_radii", 1
+        );
+        PyArrayObject *norm_values = get_required_array(
+            pack_obj, "disk_vertical_norm_values", 1
+        );
+        if (!norm_radii || !norm_values) {
+            Py_XDECREF(norm_radii);
+            Py_XDECREF(norm_values);
+            Py_DECREF(apot);
+            return -1;
+        }
+        if (PyArray_DIM(norm_radii, 0) != PyArray_DIM(norm_values, 0)
+            || PyArray_DIM(norm_radii, 0) < 1) {
+            Py_DECREF(norm_radii);
+            Py_DECREF(norm_values);
+            Py_DECREF(apot);
+            PyErr_SetString(
+                PyExc_ValueError,
+                "disk vertical normalization arrays must have equal nonzero length"
+            );
+            return -1;
+        }
         if (get_required_double(pack_obj, "disk_const", &pack->disk_const) < 0
             || get_required_double(pack_obj, "disk_rd", &pack->disk_rd) < 0
             || get_required_double(pack_obj, "disk_zd", &pack->disk_zd) < 0
@@ -100,12 +133,33 @@ static int fill_poisson_pack(PyObject *pack_obj, PoissonPack *pack, PyArrayObjec
             || get_required_double(pack_obj, "disk_hole_radius", &pack->disk_hole_radius) < 0
             || get_required_double(pack_obj, "disk_core_radius", &pack->disk_core_radius) < 0) {
             Py_DECREF(apot);
+            Py_DECREF(norm_radii);
+            Py_DECREF(norm_values);
             return -1;
         }
+        pack->n_disk_vertical_norm = (int)PyArray_DIM(norm_radii, 0);
+        pack->disk_vertical_norm_radii = (const double *)PyArray_DATA(norm_radii);
+        pack->disk_vertical_norm_values = (const double *)PyArray_DATA(norm_values);
+        *disk_norm_radii_out = norm_radii;
+        *disk_norm_values_out = norm_values;
     }
 
     PyArrayObject *halo_e = get_optional_array(pack_obj, "halo_energies", 1);
     PyArrayObject *halo_d = get_optional_array(pack_obj, "halo_dens_psi", 1);
+    if (PyErr_Occurred() || ((halo_e == NULL) != (halo_d == NULL))) {
+        Py_DECREF(apot);
+        Py_XDECREF(*disk_norm_radii_out);
+        Py_XDECREF(*disk_norm_values_out);
+        Py_XDECREF(halo_e);
+        Py_XDECREF(halo_d);
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(
+                PyExc_ValueError,
+                "halo_energies and halo_dens_psi must be provided together"
+            );
+        }
+        return -1;
+    }
     if (halo_e && halo_d) {
         pack->npsi_halo = (int)PyArray_DIM(halo_e, 0);
         pack->halo_energies = (const double *)PyArray_DATA(halo_e);
@@ -113,12 +167,34 @@ static int fill_poisson_pack(PyObject *pack_obj, PoissonPack *pack, PyArrayObjec
         if (get_required_double(pack_obj, "psi0", &pack->psi0) < 0
             || get_required_double(pack_obj, "halo_dens_at_psi0", &pack->halo_dens_at_psi0) < 0) {
             Py_DECREF(apot);
+            Py_XDECREF(*disk_norm_radii_out);
+            Py_XDECREF(*disk_norm_values_out);
+            Py_DECREF(halo_e);
+            Py_DECREF(halo_d);
             return -1;
         }
     }
+    *halo_e_out = halo_e;
+    *halo_d_out = halo_d;
 
     PyArrayObject *bulge_e = get_optional_array(pack_obj, "bulge_energies", 1);
     PyArrayObject *bulge_d = get_optional_array(pack_obj, "bulge_dens_psi", 1);
+    if (PyErr_Occurred() || ((bulge_e == NULL) != (bulge_d == NULL))) {
+        Py_DECREF(apot);
+        Py_XDECREF(*disk_norm_radii_out);
+        Py_XDECREF(*disk_norm_values_out);
+        Py_XDECREF(halo_e);
+        Py_XDECREF(halo_d);
+        Py_XDECREF(bulge_e);
+        Py_XDECREF(bulge_d);
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(
+                PyExc_ValueError,
+                "bulge_energies and bulge_dens_psi must be provided together"
+            );
+        }
+        return -1;
+    }
     if (bulge_e && bulge_d) {
         pack->npsi_bulge = (int)PyArray_DIM(bulge_e, 0);
         pack->bulge_energies = (const double *)PyArray_DATA(bulge_e);
@@ -127,9 +203,17 @@ static int fill_poisson_pack(PyObject *pack_obj, PoissonPack *pack, PyArrayObjec
             || get_required_double(pack_obj, "bulge_psid", &pack->bulge_psid) < 0
             || get_required_double(pack_obj, "bulge_dens_at_psi0", &pack->bulge_dens_at_psi0) < 0) {
             Py_DECREF(apot);
+            Py_XDECREF(*disk_norm_radii_out);
+            Py_XDECREF(*disk_norm_values_out);
+            Py_XDECREF(halo_e);
+            Py_XDECREF(halo_d);
+            Py_DECREF(bulge_e);
+            Py_DECREF(bulge_d);
             return -1;
         }
     }
+    *bulge_e_out = bulge_e;
+    *bulge_d_out = bulge_d;
     return 0;
 }
 
@@ -179,17 +263,24 @@ static PyObject *py_fill_polar_density_harmonics(
 
     PoissonPack pack = {0};
     PyArrayObject *apot_arr = NULL;
+    PyArrayObject *disk_norm_radii = NULL;
+    PyArrayObject *disk_norm_values = NULL;
     PyArrayObject *halo_e = NULL;
     PyArrayObject *halo_d = NULL;
     PyArrayObject *bulge_e = NULL;
     PyArrayObject *bulge_d = NULL;
-    if (fill_poisson_pack(pack_obj, &pack, &apot_arr) < 0) {
+    if (fill_poisson_pack(
+            pack_obj,
+            &pack,
+            &apot_arr,
+            &disk_norm_radii,
+            &disk_norm_values,
+            &halo_e,
+            &halo_d,
+            &bulge_e,
+            &bulge_d) < 0) {
         return NULL;
     }
-    halo_e = get_optional_array(pack_obj, "halo_energies", 1);
-    halo_d = get_optional_array(pack_obj, "halo_dens_psi", 1);
-    bulge_e = get_optional_array(pack_obj, "bulge_energies", 1);
-    bulge_d = get_optional_array(pack_obj, "bulge_dens_psi", 1);
 
     int rc = fill_polar_density_harmonics_omp(
         (double *)PyArray_DATA(adens_arr),
@@ -200,6 +291,8 @@ static PyObject *py_fill_polar_density_harmonics(
         n_threads
     );
     Py_DECREF(apot_arr);
+    Py_XDECREF(disk_norm_radii);
+    Py_XDECREF(disk_norm_values);
     Py_XDECREF(halo_e);
     Py_XDECREF(halo_d);
     Py_XDECREF(bulge_e);
