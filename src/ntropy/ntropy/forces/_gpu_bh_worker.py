@@ -76,11 +76,12 @@ from ntropy.forces.gpu_bh import (  # noqa: E402
     _ensure_bh_kernels,
     _launch_bh_walk,
     _prepare_tree_state,
+    _raise_if_bh_walk_overflow,
     _require_gpu_bh,
 )
 
 cp = _require_gpu_bh()
-_ensure_bh_kernels(cp)  # compile once up front
+_ensure_bh_kernels(cp, n_particles=n)  # compile once and select stack tier
 
 # Build tree on CPU (safe here: CuPy imported first), upload + unpack SoA
 state, n_nodes, n_leaf = _prepare_tree_state(cp, pos, mass, eps, state=None)
@@ -91,7 +92,7 @@ d_eps = cp.asarray(eps)
 d_idx = cp.asarray(targets)
 d_acc = cp.zeros((n_targets, 3), dtype=cp.float64)
 
-wk, _ = _ensure_bh_kernels(cp)
+wk, _ = _ensure_bh_kernels(cp, n_particles=n)
 
 # Warmup — one full multi-block walk
 _launch_bh_walk(
@@ -119,6 +120,7 @@ for _ in range(n_runs):
     times.append((time.perf_counter() - t0) * 1e3)
 
 acc_last = cp.asnumpy(d_acc)
+_raise_if_bh_walk_overflow(cp, state)
 median_ms = float(np.median(times))
 norm = float(np.linalg.norm(acc_last))
 

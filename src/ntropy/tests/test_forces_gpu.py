@@ -10,6 +10,9 @@ Test categories:
 7. Precision analysis (FP64 internal consistency)
 """
 
+import os
+from pathlib import Path
+
 import pytest
 import numpy as np
 
@@ -19,13 +22,75 @@ from ntropy.forces.gpu_direct import (
     compute_forces_gpu,
     compute_forces_gpu_from_state,
 )
-from ntropy.forces.gpu_bh import GpuBhState, compute_forces_gpu_bh
+from ntropy.forces.gpu_bh import (
+    GpuBhState,
+    _select_bh_walk_stack_capacity,
+    compute_forces_gpu_bh,
+)
 
 # Skip all GPU tests when no GPU is available
 pytestmark = pytest.mark.skipif(
     not gpu_available(),
     reason="GPU not available",
 )
+
+
+def _make_deep_cusp(depth):
+    """Build a small mixed-softening cusp with seven pending siblings/level."""
+    octant_signs = np.array(
+        [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    positions = [np.full(3, -1.0), np.full(3, 1.0)]
+    masses = [0.5, 0.5]
+    softenings = [0.002, 0.02]
+    centre = np.zeros(3, dtype=np.float64)
+    half_size = 1.0
+    softening_cycle = (1.0e-5, 5.0e-4, 2.0e-3)
+    for level in range(depth):
+        child_half = 0.5 * half_size
+        child_centres = centre + child_half * octant_signs
+        for child in range(1, 8):
+            positions.append(child_centres[child])
+            masses.append(1.0 / (level + 1.0))
+            softenings.append(softening_cycle[(level + child) % 3])
+        centre = child_centres[0]
+        half_size = child_half
+
+    target = len(positions)
+    positions.append(centre.copy())
+    masses.append(1.0)
+    softenings.append(1.0e-5)
+    return (
+        np.ascontiguousarray(positions, dtype=np.float64),
+        np.ascontiguousarray(masses, dtype=np.float64),
+        np.ascontiguousarray(softenings, dtype=np.float64),
+        np.array([target], dtype=np.int32),
+    )
+
+
+def _ac023_ic_fixture_path() -> Path:
+    """Return the optional real-system regression fixture location."""
+    override = os.environ.get("NTROPY_AC023_IC")
+    if override:
+        return Path(override).expanduser()
+    repo_root = Path(__file__).resolve().parents[3]
+    return (
+        repo_root
+        / "runs"
+        / "mw_morton_corpus_v2"
+        / "ac023abb258d"
+        / "ic_state.npz"
+    )
 
 
 # ====================================================================== #
@@ -75,6 +140,47 @@ class TestGpuDirectParity:
 class TestGpuBhParity:
     """GPU Barnes-Hut results match CPU bh_c to within tolerance."""
 
+    @pytest.mark.parametrize(
+        ("n_particles", "expected_capacity"),
+        [
+            (1, 64),
+            (8, 64),
+            (9, 128),
+            (512, 128),
+            (513, 256),
+            (16_777_216, 256),
+            (16_777_217, 512),
+            (2_147_483_647, 512),
+        ],
+    )
+    def test_walk_stack_capacity_scales_with_particle_count(
+        self, n_particles, expected_capacity
+    ):
+        assert _select_bh_walk_stack_capacity(n_particles) == expected_capacity
+
+    def test_walk_stack_capacity_rejects_empty_system(self):
+        with pytest.raises(ValueError, match="positive"):
+            _select_bh_walk_stack_capacity(0)
+
+    @pytest.mark.parametrize(
+        ("n_particles", "kernel_name"),
+        [
+            (1, "bh_walk_kernel_64"),
+            (115, "bh_walk_kernel_128"),
+            (1_750_000, "bh_walk_kernel_256"),
+            (16_777_217, "bh_walk_kernel_512"),
+        ],
+    )
+    def test_walk_kernel_specialization_matches_capacity(
+        self, n_particles, kernel_name
+    ):
+        import cupy as cp
+
+        from ntropy.forces.gpu_bh import _ensure_bh_kernels
+
+        walk, _ = _ensure_bh_kernels(cp, n_particles=n_particles)
+        assert walk.name == kernel_name
+
     @pytest.mark.parametrize("N", [200, 1024])
     @pytest.mark.parametrize("theta", [0.3, 0.5, 0.7])
     def test_bh_acceleration_parity(self, N, theta):
@@ -97,6 +203,155 @@ class TestGpuBhParity:
         # but relative error should be small (< theta * 0.05 as sanity check)
         assert rel_err.max() < theta * 0.05, \
             f"Max relative error: {rel_err.max():.2e}"
+
+    def test_deep_cusp_mixed_softening_does_not_drop_nodes(self):
+        """A deep, occupied cusp must not overflow the GPU walk stack."""
+        from ntropy.forces.bhtree_c import compute_forces_bh_c
+
+        # Populate all seven sibling octants while repeatedly following child
+        # zero toward the centre of a compact cusp.  A depth-first walk then
+        # has seven pending siblings per level, which is the pattern that
+        # exposed silent child drops in concentrated galaxy models.
+        pos, mass, eps, targets = _make_deep_cusp(depth=16)
+
+        acc_gpu = compute_forces_gpu_bh(
+            pos, mass, eps, theta=0.5, target_indices=targets
+        )
+        acc_cpu = compute_forces_bh_c(
+            pos, mass, eps, theta=0.5, target_indices=targets
+        )
+
+        assert np.allclose(acc_gpu, acc_cpu, rtol=1.0e-12, atol=1.0e-12), (
+            f"GPU={acc_gpu!r}, CPU={acc_cpu!r}"
+        )
+
+    @pytest.mark.slow
+    def test_real_ac023_ic_matches_cpu_on_representative_targets(self):
+        """The real 1.75M-particle campaign tree must match the CPU walk.
+
+        The compact synthetic cusp above isolates traversal depth, but it
+        cannot preserve the component concentrations, mixed softenings, and
+        occupied tree topology of the campaign IC that exposed the historical
+        64-entry GPU stack bug.  Keep this optional integration regression for
+        hosts that have the large campaign fixture available.
+        """
+        from ntropy.config import BhOptimizationsConfig
+        from ntropy.forces.bhtree_c import compute_forces_bh_c
+
+        fixture_path = _ac023_ic_fixture_path()
+        if not fixture_path.is_file():
+            pytest.skip(
+                "real ac023 IC fixture is not available; expected "
+                f"{fixture_path} or set NTROPY_AC023_IC"
+            )
+
+        with np.load(fixture_path, allow_pickle=False) as fixture:
+            missing = {"pos", "mass", "eps"}.difference(fixture.files)
+            assert not missing, (
+                f"ac023 fixture is missing arrays: {sorted(missing)}"
+            )
+            pos = np.ascontiguousarray(fixture["pos"], dtype=np.float64)
+            mass = np.ascontiguousarray(fixture["mass"], dtype=np.float64)
+            eps = np.ascontiguousarray(fixture["eps"], dtype=np.float64)
+
+        n_particles = 1_750_000
+        assert pos.shape == (n_particles, 3)
+        assert mass.shape == (n_particles,)
+        assert eps.shape == (n_particles,)
+        assert np.ptp(eps) > 0.0, "ac023 regression requires mixed softenings"
+
+        # This exact sample spans the IC's contiguous particle components and
+        # reproduced the old stack-64 failure: roughly 37% of its targets were
+        # contaminated and its global relative L2 error was about 0.26.
+        targets = np.linspace(
+            0, n_particles - 1, num=20_000, dtype=np.int32
+        )
+        opts = BhOptimizationsConfig(
+            preset="optimized",
+            omp_schedule="guided",
+            simd_leaves=True,
+            native_pack=False,
+        )
+
+        acc_gpu = compute_forces_gpu_bh(
+            pos,
+            mass,
+            eps,
+            theta=0.5,
+            target_indices=targets,
+            bh_opts=opts,
+        )
+        acc_cpu = compute_forces_bh_c(
+            pos,
+            mass,
+            eps,
+            theta=0.5,
+            target_indices=targets,
+            bh_opts=opts,
+        )
+
+        assert np.isfinite(acc_gpu).all()
+        assert np.isfinite(acc_cpu).all()
+        cpu_norm = np.linalg.norm(acc_cpu)
+        assert cpu_norm > 0.0
+        relative_l2 = np.linalg.norm(acc_gpu - acc_cpu) / cpu_norm
+        assert relative_l2 < 1.0e-10, (
+            f"real ac023 GPU/CPU relative L2 error: {relative_l2:.3e}"
+        )
+
+    def test_walk_stack_overflow_is_explicit(self, monkeypatch):
+        """A topology needing more than 256 pending nodes fails clearly."""
+        import cupy as cp
+
+        import ntropy.forces.gpu_bh as gpu_bh_module
+
+        # The production builder's padded root and minimum leaf size bound its
+        # achievable pending-node count.  Construct the adversarial topology
+        # directly so this defensive path remains tested: every internal node
+        # has eight children and child zero continues for 38 levels, leaving
+        # seven pending siblings per level during the depth-first walk.
+        depth = 38
+        n_nodes = 1 + 8 * depth
+        children = np.full((n_nodes, 8), -1, dtype=np.int32)
+        is_leaf = np.ones(n_nodes, dtype=np.uint8)
+        current = 0
+        next_node = 1
+        for _ in range(depth):
+            child_indices = np.arange(next_node, next_node + 8, dtype=np.int32)
+            children[current] = child_indices
+            is_leaf[current] = 0
+            current = int(child_indices[0])
+            next_node += 8
+
+        state = GpuBhState(n_nodes=n_nodes, n_particles=n_nodes)
+        state.leaf_direct = 1
+        state.d_mx = cp.zeros(n_nodes, dtype=cp.float64)
+        state.d_my = cp.zeros(n_nodes, dtype=cp.float64)
+        state.d_mz = cp.zeros(n_nodes, dtype=cp.float64)
+        state.d_sz = cp.ones(n_nodes, dtype=cp.float64)
+        state.d_ms = cp.ones(n_nodes, dtype=cp.float64)
+        state.d_il = cp.asarray(is_leaf)
+        state.d_ch = cp.asarray(children.ravel())
+        state.d_ls = cp.arange(n_nodes, dtype=cp.int32)
+        state.d_lc = cp.asarray(is_leaf, dtype=cp.int32)
+        state.d_leaf_indices = cp.array([-1], dtype=cp.int32)
+
+        monkeypatch.setattr(
+            gpu_bh_module,
+            "_prepare_tree_state",
+            lambda *args, **kwargs: (state, n_nodes, 1),
+        )
+        with pytest.raises(RuntimeError, match="128-entry traversal stack"):
+            gpu_bh_module.compute_forces_gpu_bh(
+                np.zeros((n_nodes, 3), dtype=np.float64),
+                np.ones(n_nodes, dtype=np.float64),
+                np.ones(n_nodes, dtype=np.float64),
+                theta=0.0,
+                target_indices=np.array([0], dtype=np.int32),
+                state=state,
+            )
+        assert int(cp.asnumpy(state.d_walk_overflow)[0]) == 1
+        assert state.walk_stack_capacity == 128
 
 
 # ====================================================================== #
