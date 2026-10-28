@@ -14,8 +14,8 @@ from galacticsics.io.formats import (
     read_disk_correction,
     read_frequency_table,
 )
-from galacticsics.potential.evaluate import evaluate_potential
 from galacticsics.potential.harmonics import HarmonicPotential
+from galacticsics.sampling.equilibrium import read_equilibrium_spatial_profile
 
 
 def _plcon_array(pot: HarmonicPotential) -> np.ndarray:
@@ -97,18 +97,31 @@ def pack_potential(pot: HarmonicPotential) -> dict:
     }
 
 
+def _pack_spatial_profile(work_dir: Path, component: str) -> dict:
+    profile = read_equilibrium_spatial_profile(
+        work_dir / f"{component}_spatial_profile.npz"
+    )
+    if profile.component != component:
+        raise ValueError(
+            f"spatial profile component mismatch: expected {component}, "
+            f"found {profile.component}"
+        )
+    return {
+        "spatial_radius": profile.radius,
+        "spatial_envelope": profile.envelope,
+        "spatial_cdf": profile.radial_cdf,
+        "spatial_psi": profile.psi,
+        "spatial_density": profile.density,
+        "spatial_mass": profile.mass,
+    }
+
+
 def pack_halo_context(work_dir: Path) -> dict:
     work_dir = Path(work_dir)
     pot = read_harmonic_potential(work_dir / "dbh.dat")
-    masses = (work_dir / "mr.dat").read_text().splitlines()
-    halomass = float(masses[2].split()[0])
-    haloedge = float(masses[2].split()[1])
     halo = pot.model.halo
     if halo is None:
         raise ValueError("halo component missing")
-    if halomass <= 0 or haloedge <= 0:
-        halomass = max(halomass, halo.v0**2 * halo.r_outer)
-        haloedge = max(haloedge, halo.r_outer)
 
     energies = []
     log_df = []
@@ -133,31 +146,21 @@ def pack_halo_context(work_dir: Path) -> dict:
     )
     # Lowered-DF cutoff at the truncation potential (legacy genhalo convention).
     fcut = float(np.exp(log_interp(pot.psic)))
-
-    from galacticsics.potential.poisson.densities import halo_density_spherical
-
-    r_grid = np.linspace(0.0, haloedge, 50)
-    rhocur = np.array([halo_density_spherical(float(r), halo) for r in r_grid]) * r_grid * r_grid
-    rhomax = float(rhocur.max()) * 1.5
-    rhomin = 1e-10 * rhomax
+    f_sorted = np.maximum(np.exp(log_df_arr) - fcut, 0.0)
+    fmax_cum = np.ascontiguousarray(np.maximum.accumulate(f_sorted), dtype=np.float64)
 
     ctx = pack_potential(pot)
     ctx.update(
         {
-            "halo_a": float(halo.a),
-            "halo_v0": float(halo.v0),
-            "halo_cusp": float(halo.cusp),
-            "halo_r_outer": float(halo.r_outer),
-            "halo_dr_trunc": float(halo.dr_trunc),
             "df_energy": energies_arr,
             "df_log_df": log_df_arr,
+            "df_fmax_cum": fmax_cum,
             "df_fcut": fcut,
-            "halomass": halomass,
-            "haloedge": haloedge,
-            "rhomax": rhomax,
-            "rhomin": rhomin,
         }
     )
+    ctx.update(_pack_spatial_profile(work_dir, "halo"))
+    ctx["halomass"] = ctx["spatial_mass"]
+    ctx["haloedge"] = float(ctx["spatial_radius"][-1])
     return ctx
 
 
@@ -223,28 +226,13 @@ def pack_disk_context(work_dir: Path) -> dict:
 
 
 def pack_bulge_context(work_dir: Path) -> dict:
-    """Pack tables for OpenMP ``genbulge`` (spherical Sersic + ``dfsersic.dat``)."""
-    from galacticsics.models import SersicBulge
-    from galacticsics.potential.poisson.sersic import (
-        bulge_density_spherical,
-        sersic_params_from_bulge,
-    )
+    """Pack final-potential spatial and velocity tables for OpenMP ``genbulge``."""
 
     work_dir = Path(work_dir)
     pot = read_harmonic_potential(work_dir / "dbh.dat")
-    masses = (work_dir / "mr.dat").read_text().splitlines()
-    bulgemass = float(masses[1].split()[0])
-    bulgeedge = float(masses[1].split()[1])
     bulge = pot.model.bulge
-    params_path = work_dir / "bulge_params.dat"
-    if params_path.is_file():
-        nnn, ppp, v0b, ab = (float(x) for x in params_path.read_text().split()[:4])
-        bulge = SersicBulge(n_sersic=nnn, ppp=ppp, v0=v0b, a=ab, enabled=True)
     if bulge is None or not bulge.enabled:
         raise ValueError("bulge component missing")
-    if bulgemass <= 0.0 or bulgeedge <= 0.0:
-        bulgemass = max(bulgemass, bulge.v0**2 * bulge.a)
-        bulgeedge = max(bulgeedge, 3.0 * bulge.a)
 
     energies = []
     log_df = []
@@ -269,34 +257,18 @@ def pack_bulge_context(work_dir: Path) -> dict:
     f_sorted = np.maximum(np.exp(log_df_arr) - fcut, 0.0)
     fmax_cum = np.ascontiguousarray(np.maximum.accumulate(f_sorted), dtype=np.float64)
 
-    params = sersic_params_from_bulge(bulge)
-    n_r = max(64, int(bulgeedge / max(bulge.a, 0.05) * 20))
-    r_grid = np.linspace(0.0, bulgeedge, n_r)
-    weight = np.array(
-        [bulge_density_spherical(float(r), bulge, params) * r * r for r in r_grid],
-        dtype=float,
-    )
-    wmax = float(weight.max()) * 1.5 if weight.size else 0.0
-    wmin = 1e-10 * wmax if wmax > 0.0 else 0.0
-
     ctx = pack_potential(pot)
     ctx.update(
         {
-            "bulge_n": float(params.n),
-            "bulge_ppp": float(params.ppp),
-            "bulge_Re": float(params.Re),
-            "bulge_butt": float(params.butt),
-            "bulge_rho0": float(params.rho0),
             "df_energy": energies_arr,
             "df_log_df": log_df_arr,
             "df_fmax_cum": fmax_cum,
             "df_fcut": fcut,
-            "bulgemass": bulgemass,
-            "bulgeedge": bulgeedge,
-            "wmax": wmax,
-            "wmin": wmin,
         }
     )
+    ctx.update(_pack_spatial_profile(work_dir, "bulge"))
+    ctx["bulgemass"] = ctx["spatial_mass"]
+    ctx["bulgeedge"] = float(ctx["spatial_radius"][-1])
     return ctx
 
 

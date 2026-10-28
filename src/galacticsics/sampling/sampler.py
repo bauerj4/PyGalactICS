@@ -88,6 +88,8 @@ def prepare_model_directory(
             "freqdbh.dat",
             "denspsihalo.dat",
             "denspsibulge.dat",
+            "halo_spatial_profile.npz",
+            "bulge_spatial_profile.npz",
             "dfnfw.dat",
             "dfsersic.dat",
             "dfhalo.table",

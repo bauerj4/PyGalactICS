@@ -539,17 +539,50 @@ static void center_particles(double *out, int n) {
     }
 }
 
+static int sample_spatial_position(
+    SamplerRng *rng,
+    const PotPack *pot,
+    const SpatialPack *spatial,
+    double *x,
+    double *y,
+    double *z,
+    double *psi
+) {
+    double u = sampler_rng_uniform(rng);
+    double rad = interp1d(spatial->cdf, spatial->radius, spatial->n_radius, u);
+    double mu = 2.0 * sampler_rng_uniform(rng) - 1.0;
+    double phi = sampler_rng_range(rng, 0.0, 2.0 * M_PI);
+    double r_cyl = rad * sqrt(fmax(0.0, 1.0 - mu * mu));
+    *z = rad * mu;
+    *x = r_cyl * cos(phi);
+    *y = r_cyl * sin(phi);
+    *psi = pot_eval(pot, r_cyl, *z);
+    if (*psi < pot->psic) {
+        return 0;
+    }
+    double rho = interp1d(
+        spatial->psi, spatial->density, spatial->n_psi, *psi
+    );
+    double envelope = interp1d(
+        spatial->radius, spatial->envelope, spatial->n_radius, rad
+    );
+    if (rho > envelope * (1.0 + 1.0e-10)) {
+        return -1;
+    }
+    if (envelope <= 0.0 || envelope * sampler_rng_uniform(rng) > rho) {
+        return 0;
+    }
+    return 1;
+}
+
 int sample_halo_omp(
     double *out,
     int n_particles,
     int seed,
     double mass,
-    double haloedge,
-    double rhomax,
-    double rhomin,
     double streaming,
     const PotPack *pot,
-    const HaloParams *halo,
+    const SpatialPack *spatial,
     const DfPack *df,
     const SamplerOpts *opts
 ) {
@@ -596,23 +629,18 @@ int sample_halo_omp(
             }
             local_attempts++;
 
-            double u1 = haloedge * sampler_rng_uniform(&rng);
-            double v1 = M_PI * (sampler_rng_uniform(&rng) * 2.0 - 1.0);
-            double r_cyl = u1;
-            double z = r_cyl * tan(v1);
-            if (fabs(z) > 2.0 * haloedge) {
-                continue;
+            double x, y, z, psi;
+            int spatial_ok = sample_spatial_position(
+                &rng, pot, spatial, &x, &y, &z, &psi
+            );
+            if (spatial_ok < 0) {
+#pragma omp critical
+                {
+                    if (failed == 0) failed = 2;
+                }
+                break;
             }
-            double rad = hypot(r_cyl, z);
-            double rhotst = halo_density_spherical(halo, rad) * (r_cyl * r_cyl + z * z);
-            if (rhotst < rhomin || (rhomax - rhomin) * sampler_rng_uniform(&rng) > rhotst) {
-                continue;
-            }
-            double phi = sampler_rng_range(&rng, 0.0, 2.0 * M_PI);
-            double x = r_cyl * cos(phi);
-            double y = r_cyl * sin(phi);
-            double psi = pot_eval(pot, r_cyl, z);
-            if (psi < pot->psic) {
+            if (spatial_ok == 0) {
                 continue;
             }
             double vmax2 = 2.0 * (psi - pot->psic);
@@ -895,12 +923,9 @@ int sample_bulge_omp(
     int n_particles,
     int seed,
     double mass,
-    double bulgeedge,
-    double wmax,
-    double wmin,
     double streaming,
     const PotPack *pot,
-    const BulgeParams *bulge,
+    const SpatialPack *spatial,
     const DfPack *df,
     const SamplerOpts *opts
 ) {
@@ -941,20 +966,18 @@ int sample_bulge_omp(
             }
             local_attempts++;
 
-            /* Spherical proposal: r ∝ r² ρ(r), μ=cosθ uniform, φ uniform. */
-            double rad = bulgeedge * sampler_rng_uniform(&rng);
-            double w = sersic_density_spherical(bulge, rad) * rad * rad;
-            if (w < wmin || wmax * sampler_rng_uniform(&rng) > w) {
-                continue;
+            double x, y, z, psi;
+            int spatial_ok = sample_spatial_position(
+                &rng, pot, spatial, &x, &y, &z, &psi
+            );
+            if (spatial_ok < 0) {
+#pragma omp critical
+                {
+                    if (failed == 0) failed = 2;
+                }
+                break;
             }
-            double mu = 2.0 * sampler_rng_uniform(&rng) - 1.0;
-            double phi = sampler_rng_range(&rng, 0.0, 2.0 * M_PI);
-            double r_cyl = rad * sqrt(fmax(0.0, 1.0 - mu * mu));
-            double z = rad * mu;
-            double x = r_cyl * cos(phi);
-            double y = r_cyl * sin(phi);
-            double psi = pot_eval(pot, r_cyl, z);
-            if (psi < pot->psic) {
+            if (spatial_ok == 0) {
                 continue;
             }
             double vmax2 = 2.0 * (psi - pot->psic);

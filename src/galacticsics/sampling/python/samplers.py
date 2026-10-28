@@ -293,17 +293,15 @@ def sample_halo_python(
 
     work_dir = Path(work_dir)
     pot = read_harmonic_potential(work_dir / "dbh.dat")
-    masses = (work_dir / "mr.dat").read_text().splitlines()
-    halomass = float(masses[2].split()[0])
-    haloedge = float(masses[2].split()[1])
-    if halomass <= 0 or haloedge <= 0:
-        halomass = max(halomass, pot.model.halo.v0**2 * pot.model.halo.r_outer if pot.model.halo else 1.0)
-        haloedge = max(haloedge, pot.model.halo.r_outer if pot.model.halo else 100.0)
+    from galacticsics.sampling.equilibrium import (
+        read_equilibrium_spatial_profile,
+        sample_equilibrium_position,
+    )
+
+    spatial = read_equilibrium_spatial_profile(work_dir / "halo_spatial_profile.npz")
     psic = pot.psic
     rng = _rng_from_legacy_seed(seed)
-    mass = halomass / n_particles
-    eps = 0.05
-
+    mass = spatial.mass / n_particles
     energies = []
     log_df = []
     for line in (work_dir / "dfnfw.dat").read_text().splitlines():
@@ -334,38 +332,34 @@ def sample_halo_python(
     # Lowered-DF cutoff (legacy genhalo): interpolate at psic directly, since
     # df_halo() clamps to zero at the cutoff.
     fcut = float(np.exp(log_interp(psic)))
-    from galacticsics.potential.poisson.densities import halo_density_spherical
+    f_sorted = np.maximum(np.exp(log_df) - fcut, 0.0)
+    fmax_cum = np.maximum.accumulate(f_sorted)
 
-    halo = pot.model.halo
-    assert halo is not None
-    r_grid = np.linspace(0.0, haloedge, 50)
-    rhocur = np.array([halo_density_spherical(float(r), halo) for r in r_grid]) * r_grid * r_grid
-    rhomax = float(rhocur.max()) * 1.5
-    rhomin = 1e-10 * rhomax
+    def fmax_at_psi(psi: float) -> float:
+        if psi <= float(energies[0]):
+            return float(fmax_cum[0])
+        if psi >= float(energies[-1]):
+            return float(fmax_cum[-1])
+        j = int(np.searchsorted(energies, psi, side="right") - 1)
+        return float(fmax_cum[max(0, j)])
+
     attempt_limit = max_attempts if max_attempts is not None else max(500_000, 15 * n_particles)
 
     parts: list[tuple] = []
     attempts = 0
     while len(parts) < n_particles and attempts < attempt_limit:
         attempts += 1
-        u1 = haloedge * rng.random()
-        v1 = math.pi * (rng.random() * 2 - 1)
-        r_cyl = u1
-        z = r_cyl * math.tan(v1)
-        if abs(z) > 2 * haloedge:
+        position = sample_equilibrium_position(rng, pot, spatial)
+        if position is None:
             continue
-        rhotst = halo_density_spherical(math.hypot(r_cyl, z), halo) * (r_cyl * r_cyl + z * z)
-        if rhotst < rhomin or (rhomax - rhomin) * rng.random() > rhotst:
-            continue
-        phi = rng.uniform(0, 2 * math.pi)
-        x = r_cyl * math.cos(phi)
-        y = r_cyl * math.sin(phi)
+        x, y, z = position
+        r_cyl = math.hypot(x, y)
         psi = evaluate_potential(pot, r_cyl, z)
         if psi < psic:
             continue
         vmax2 = 2 * (psi - psic)
         vmax = math.sqrt(max(vmax2, 0.0))
-        fmax = max(df_halo(psi) - fcut, 0.0)
+        fmax = fmax_at_psi(psi)
         if fmax <= 0:
             continue
         accepted = False
@@ -487,32 +481,17 @@ def sample_bulge_python(
     elif config is None or config.use_openmp:
         warn_python_sampler_fallback("genbulge", sampler.reason, progress_log=progress_log)
 
-    from galacticsics.potential.poisson.sersic import (
-        bulge_density_spherical,
-        sersic_params_from_bulge,
-    )
-
     work_dir = Path(work_dir)
     pot = read_harmonic_potential(work_dir / "dbh.dat")
-    masses = (work_dir / "mr.dat").read_text().splitlines()
-    bulgemass = float(masses[1].split()[0])
-    bulgeedge = float(masses[1].split()[1])
-    # Prefer bulge_params.dat (includes ppp); dbh.dat header drops ppp → 0.
-    bulge = pot.model.bulge
-    params_path = work_dir / "bulge_params.dat"
-    if params_path.is_file():
-        nnn, ppp, v0b, ab = (float(x) for x in params_path.read_text().split()[:4])
-        from galacticsics.models import SersicBulge
+    from galacticsics.sampling.equilibrium import (
+        read_equilibrium_spatial_profile,
+        sample_equilibrium_position,
+    )
 
-        bulge = SersicBulge(n_sersic=nnn, ppp=ppp, v0=v0b, a=ab, enabled=True)
-    if bulgemass <= 0.0 or bulgeedge <= 0.0:
-        if bulge is not None:
-            bulgemass = max(bulgemass, bulge.v0**2 * bulge.a)
-            bulgeedge = max(bulgeedge, 3.0 * bulge.a)
+    spatial = read_equilibrium_spatial_profile(work_dir / "bulge_spatial_profile.npz")
     psic = pot.psic
     rng = _rng_from_legacy_seed(seed)
-    mass = bulgemass / n_particles
-    assert bulge is not None
+    mass = spatial.mass / n_particles
 
     energies = []
     log_df = []
@@ -540,7 +519,7 @@ def sample_bulge_python(
             return 0.0
         return float(np.exp(log_interp(psi)))
 
-    fcut = df_bulge(psic)
+    fcut = float(np.exp(log_interp(psic)))
     # Running max of f(E)-fcut on the DF table (low→high E). Required when f is
     # non-monotonic; fmax=f(ψ) alone accepts escape-speed trials if f(ψ) is tiny.
     e_sorted = energies
@@ -555,34 +534,16 @@ def sample_bulge_python(
         j = int(np.searchsorted(e_sorted, psi, side="right") - 1)
         return float(fmax_cum[max(0, j)])
 
-    params = sersic_params_from_bulge(bulge)
-    # Spherical proposal: r from ∝ r² ρ(r), μ=cosθ uniform, φ uniform.
-    # Avoids the legacy cylindrical (R, z=R tan v) envelope that looks like a can.
-    n_r = max(64, int(bulgeedge / max(bulge.a, 0.05) * 20))
-    r_grid = np.linspace(0.0, bulgeedge, n_r)
-    rho_r = np.array(
-        [bulge_density_spherical(float(r), bulge, params) for r in r_grid],
-        dtype=float,
-    )
-    weight = rho_r * r_grid * r_grid
-    wmax = float(weight.max()) * 1.5 if weight.size else 0.0
-    wmin = 1e-10 * wmax if wmax > 0.0 else 0.0
-
     attempt_limit = max_attempts if max_attempts is not None else max(500_000, 15 * n_particles)
     parts: list[tuple] = []
     attempts = 0
     while len(parts) < n_particles and attempts < attempt_limit:
         attempts += 1
-        rad = bulgeedge * rng.random()
-        w = bulge_density_spherical(rad, bulge, params) * rad * rad
-        if w < wmin or wmax * rng.random() > w:
+        position = sample_equilibrium_position(rng, pot, spatial)
+        if position is None:
             continue
-        mu = 2.0 * rng.random() - 1.0
-        phi = rng.uniform(0.0, 2.0 * math.pi)
-        r_cyl = rad * math.sqrt(max(0.0, 1.0 - mu * mu))
-        z = rad * mu
-        x = r_cyl * math.cos(phi)
-        y = r_cyl * math.sin(phi)
+        x, y, z = position
+        r_cyl = math.hypot(x, y)
         psi = evaluate_potential(pot, r_cyl, z)
         if psi < psic:
             continue

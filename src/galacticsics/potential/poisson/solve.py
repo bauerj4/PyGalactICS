@@ -37,8 +37,43 @@ from galacticsics.potential.poisson.integrals import (
     poisson_harmonics_from_density,
 )
 from galacticsics.potential.poisson.potential import PoissonArrays, potential_at
-from galacticsics.potential.poisson.sersic import bulge_mass_spherical
 from galacticsics.numerics import quadrature_node_count
+
+
+def _write_equilibrium_spatial_profiles(
+    work_dir: Path,
+    potential: HarmonicPotential,
+    *,
+    has_halo: bool,
+    has_bulge: bool,
+) -> dict[str, float]:
+    """Persist final-potential spheroid proposals and return their masses."""
+
+    from galacticsics.sampling.equilibrium import (
+        build_equilibrium_spatial_profile,
+        write_equilibrium_spatial_profile,
+    )
+
+    masses: dict[str, float] = {}
+    for component, enabled in (("halo", has_halo), ("bulge", has_bulge)):
+        if not enabled:
+            continue
+        table = work_dir / f"denspsi{component}.dat"
+        if not table.is_file():
+            raise FileNotFoundError(
+                f"missing {table.name}; cannot build equilibrium spatial sampler"
+            )
+        profile = build_equilibrium_spatial_profile(
+            potential,
+            table,
+            component=component,
+        )
+        write_equilibrium_spatial_profile(
+            work_dir / f"{component}_spatial_profile.npz",
+            profile,
+        )
+        masses[component] = profile.mass
+    return masses
 
 
 def _assert_python_supported(model: GalaxyModel) -> None:
@@ -346,15 +381,6 @@ def _solve_spherical_monopole_python(
         - monopole_at_origin
     )
 
-    halo_mass = float(4 * math.pi * np.sum(halo_density[1:] * grid_radii[1:] ** 2) * radial_step)
-    halo_outer_radius = halo.r_outer
-    if has_bulge and bulge is not None:
-        bulge_mass = bulge_mass_spherical(grid_radii, bulge, radial_step)
-        bulge_outer_radius = 3.0 * bulge.a
-    else:
-        bulge_mass = 0.0
-        bulge_outer_radius = 0.0
-
     tidal_radius = halo.r_outer
     for shell_index in range(1, n_radial_shells + 1):
         potential_inner = halo_monopole_potential[shell_index - 1]
@@ -366,11 +392,6 @@ def _solve_spherical_monopole_python(
                 shell_index - 1 - (potential_inner - cutoff_potential) / (potential_outer - potential_inner)
             ) * radial_step
             break
-
-    (work_dir / "rtidal.dat").write_text(f"{tidal_radius}\n")
-    (work_dir / "mr.dat").write_text(
-        f"0.0 0.0\n{bulge_mass} {bulge_outer_radius}\n{halo_mass} {halo_outer_radius}\n"
-    )
 
     density_harmonics = np.zeros((n_harmonic_rows, n_radial_shells + 1), dtype=float)
     for shell_index in range(1, n_radial_shells + 1):
@@ -398,6 +419,20 @@ def _solve_spherical_monopole_python(
         fr2=force_second_harmonics,
     )
     write_harmonic_potential(pot, work_dir / "dbh.dat")
+    spheroid_masses = _write_equilibrium_spatial_profiles(
+        work_dir,
+        pot,
+        has_halo=True,
+        has_bulge=has_bulge,
+    )
+    halo_mass = spheroid_masses["halo"]
+    halo_outer_radius = pot.r_edge
+    bulge_mass = spheroid_masses.get("bulge", 0.0)
+    bulge_outer_radius = pot.r_edge if has_bulge else 0.0
+    (work_dir / "rtidal.dat").write_text(f"{tidal_radius}\n")
+    (work_dir / "mr.dat").write_text(
+        f"0.0 0.0\n{bulge_mass} {bulge_outer_radius}\n{halo_mass} {halo_outer_radius}\n"
+    )
     _write_halo_only_harmonics(
         pot,
         model=model,
@@ -901,27 +936,12 @@ def solve_poisson_python(
             raise RuntimeError(message)
 
     arrays.lmax_active = max_harmonic_degree
-    total_mass = arrays.fr[0, n_radial_shells] / math.sqrt(4 * math.pi) * (radial_step * n_radial_shells) ** 2
-    halo_mass = float(4 * math.pi * np.sum(halo_density[1:] * grid_radii[1:] ** 2) * radial_step)
-    halo_outer_radius = halo.r_outer
     if has_disk and model.disk is not None:
-        disk_mass = max(total_mass - halo_mass, model.disk.mass * 0.5)
+        disk_mass = model.disk.mass
         disk_outer_radius = model.disk.outer_radius + 2 * model.disk.trunc_width
     else:
         disk_mass = 0.0
         disk_outer_radius = 0.0
-    if has_bulge and model.bulge is not None:
-        bulge_mass = bulge_mass_spherical(grid_radii, model.bulge, radial_step)
-        bulge_outer_radius = 3.0 * model.bulge.a
-    else:
-        bulge_mass = 0.0
-        bulge_outer_radius = 0.0
-
-    (work_dir / "rtidal.dat").write_text(f"{tidal_radius}\n")
-    (work_dir / "mr.dat").write_text(
-        f"{disk_mass} {disk_outer_radius}\n{bulge_mass} {bulge_outer_radius}\n{halo_mass} {halo_outer_radius}\n"
-    )
-
     pot = HarmonicPotential(
         model=model,
         psi0=reference_potential,
@@ -937,6 +957,20 @@ def solve_poisson_python(
         fr2=arrays.fr2.copy(),
     )
     write_harmonic_potential(pot, work_dir / "dbh.dat")
+    spheroid_masses = _write_equilibrium_spatial_profiles(
+        work_dir,
+        pot,
+        has_halo=True,
+        has_bulge=has_bulge,
+    )
+    halo_mass = spheroid_masses["halo"]
+    halo_outer_radius = pot.r_edge
+    bulge_mass = spheroid_masses.get("bulge", 0.0)
+    bulge_outer_radius = pot.r_edge if has_bulge else 0.0
+    (work_dir / "rtidal.dat").write_text(f"{tidal_radius}\n")
+    (work_dir / "mr.dat").write_text(
+        f"{disk_mass} {disk_outer_radius}\n{bulge_mass} {bulge_outer_radius}\n{halo_mass} {halo_outer_radius}\n"
+    )
     _write_halo_only_harmonics(
         pot,
         model=model,

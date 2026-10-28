@@ -47,6 +47,8 @@ _IC_SKIP_NAMES = frozenset(
         "freqdbh.dat",
         "denspsihalo.dat",
         "denspsibulge.dat",
+        "halo_spatial_profile.npz",
+        "bulge_spatial_profile.npz",
         "dfnfw.dat",
         "dfsersic.dat",
         "dfhalo.table",
