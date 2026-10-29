@@ -108,6 +108,16 @@ def test_summary_lines_includes_openmp(tmp_path):
     assert any("Sample:" in line for line in lines)
 
 
+def test_run_config_parses_gpu_batch_size(tmp_path):
+    raw = default_walkthrough_config()
+    raw.setdefault("run", {})["gpu_batch_size"] = 4
+    cfg = WalkthroughConfig.from_raw(
+        raw,
+        config_path=tmp_path / "mw_walkthrough.json",
+    )
+    assert cfg.run_campaign_kwargs()["gpu_batch_size"] == 4
+
+
 def test_load_mw_walkthrough_config():
     path = Path(__file__).resolve().parents[1] / "notebooks" / "campaigns" / "mw_walkthrough.json"
     cfg = load_walkthrough_config(path)

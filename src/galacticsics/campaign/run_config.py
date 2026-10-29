@@ -437,6 +437,7 @@ class WalkthroughConfig:
             "bh_optimizations_extra": bh_extra,
             "eps_by_component": softening_eps_by_component(self.raw),
             "raw_config": self.raw,
+            "gpu_batch_size": max(1, int(self.run.get("gpu_batch_size", 1))),
             "solve_kwargs": {
                 k: v
                 for k, v in {
