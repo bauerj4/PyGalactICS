@@ -66,6 +66,16 @@ typedef struct {
 } DfPack;
 
 typedef struct {
+    int n_radius;
+    const double *radius;
+    const double *envelope;
+    const double *cdf;
+    int n_psi;
+    const double *psi;
+    const double *density;
+} SpatialPack;
+
+typedef struct {
     double a;
     double v0;
     double cusp;
@@ -120,12 +130,9 @@ int sample_halo_omp(
     int n_particles,
     int seed,
     double mass,
-    double haloedge,
-    double rhomax,
-    double rhomin,
     double streaming,
     const PotPack *pot,
-    const HaloParams *halo,
+    const SpatialPack *spatial,
     const DfPack *df,
     const SamplerOpts *opts
 );
@@ -153,12 +160,9 @@ int sample_bulge_omp(
     int n_particles,
     int seed,
     double mass,
-    double bulgeedge,
-    double wmax,
-    double wmin,
     double streaming,
     const PotPack *pot,
-    const BulgeParams *bulge,
+    const SpatialPack *spatial,
     const DfPack *df,
     const SamplerOpts *opts
 );

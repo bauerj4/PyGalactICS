@@ -4,6 +4,9 @@
 
 #include "sampler.h"
 
+/* Keep in sync with DISK_VELOCITY_ENVELOPE_SAFETY in python/samplers.py. */
+#define DISK_VELOCITY_ENVELOPE_SAFETY 2.0
+
 #include <math.h>
 #include <string.h>
 
@@ -448,15 +451,30 @@ double find_fmax(
         *vphi_mode = vpmax;
         return diskdf5ez(0.0, vpmax, 0.0, r, z, pot, freq, corr, rcirc);
     }
-    double best_log = -INFINITY;
-    int best_i = 0;
+    double coarse_log[33];
     for (int i = 0; i <= 32; i++) {
         double offset = -8.0 + 0.5 * (double)i;
         double v = vpmax + offset * vsigp;
-        double log_f = log_diskdf5ez(0.0, v, 0.0, r, z, pot, freq, corr, rcirc);
-        if (log_f > best_log) {
-            best_log = log_f;
+        coarse_log[i] = log_diskdf5ez(
+            0.0, v, 0.0, r, z, pot, freq, corr, rcirc
+        );
+    }
+    int best_i = -1;
+    double best_log = -INFINITY;
+    for (int i = 1; i < 32; i++) {
+        if (coarse_log[i] >= coarse_log[i - 1]
+            && coarse_log[i] >= coarse_log[i + 1]
+            && coarse_log[i] > best_log) {
+            best_log = coarse_log[i];
             best_i = i;
+        }
+    }
+    if (best_i < 0) {
+        for (int i = 0; i <= 32; i++) {
+            if (coarse_log[i] > best_log) {
+                best_log = coarse_log[i];
+                best_i = i;
+            }
         }
     }
     double center = -8.0 + 0.5 * (double)best_i;
@@ -500,10 +518,47 @@ double find_fmax(
         best_offset = right;
     }
     *vphi_mode = vpmax + best_offset * vsigp;
-    if (!isfinite(best_log) || best_log < -745.0) {
+
+    /* Recentring changes the actual proposal support.  Scan that complete
+       interval rather than reusing the circular-speed-centred maximum. */
+    double support_lo = best_offset - 8.0;
+    double support_hi = best_offset + 8.0;
+    double envelope_log = best_log;
+    for (int i = 0; i <= 128; i++) {
+        double offset = support_lo + (support_hi - support_lo) * (double)i / 128.0;
+        double log_f = log_diskdf5ez(
+            0.0, vpmax + offset * vsigp, 0.0, r, z, pot, freq, corr, rcirc
+        );
+        if (log_f > envelope_log) {
+            envelope_log = log_f;
+        }
+    }
+    /* rcirc(|Lz|) produces a narrow one-sided cusp near v_phi=0.  Probe it
+       explicitly when it lies inside the recentered proposal. */
+    double zero_offset = -vpmax / vsigp;
+    if (zero_offset >= support_lo && zero_offset <= support_hi) {
+        const double cusp_delta[5] = {1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2};
+        for (int i = 0; i < 5; i++) {
+            for (int sign = -1; sign <= 1; sign += 2) {
+                double offset = zero_offset + (double)sign * cusp_delta[i];
+                if (offset < support_lo || offset > support_hi) {
+                    continue;
+                }
+                double log_f = log_diskdf5ez(
+                    0.0, vpmax + offset * vsigp, 0.0, r, z,
+                    pot, freq, corr, rcirc
+                );
+                if (log_f > envelope_log) {
+                    envelope_log = log_f;
+                }
+            }
+        }
+    }
+
+    if (!isfinite(envelope_log) || envelope_log < -745.0) {
         return 0.0;
     }
-    return exp(fmin(best_log, 700.0));
+    return exp(fmin(envelope_log, 700.0));
 }
 
 /* --- OpenMP samplers --- */
@@ -539,17 +594,50 @@ static void center_particles(double *out, int n) {
     }
 }
 
+static int sample_spatial_position(
+    SamplerRng *rng,
+    const PotPack *pot,
+    const SpatialPack *spatial,
+    double *x,
+    double *y,
+    double *z,
+    double *psi
+) {
+    double u = sampler_rng_uniform(rng);
+    double rad = interp1d(spatial->cdf, spatial->radius, spatial->n_radius, u);
+    double mu = 2.0 * sampler_rng_uniform(rng) - 1.0;
+    double phi = sampler_rng_range(rng, 0.0, 2.0 * M_PI);
+    double r_cyl = rad * sqrt(fmax(0.0, 1.0 - mu * mu));
+    *z = rad * mu;
+    *x = r_cyl * cos(phi);
+    *y = r_cyl * sin(phi);
+    *psi = pot_eval(pot, r_cyl, *z);
+    if (*psi < pot->psic) {
+        return 0;
+    }
+    double rho = interp1d(
+        spatial->psi, spatial->density, spatial->n_psi, *psi
+    );
+    double envelope = interp1d(
+        spatial->radius, spatial->envelope, spatial->n_radius, rad
+    );
+    if (rho > envelope * (1.0 + 1.0e-10)) {
+        return -1;
+    }
+    if (envelope <= 0.0 || envelope * sampler_rng_uniform(rng) > rho) {
+        return 0;
+    }
+    return 1;
+}
+
 int sample_halo_omp(
     double *out,
     int n_particles,
     int seed,
     double mass,
-    double haloedge,
-    double rhomax,
-    double rhomin,
     double streaming,
     const PotPack *pot,
-    const HaloParams *halo,
+    const SpatialPack *spatial,
     const DfPack *df,
     const SamplerOpts *opts
 ) {
@@ -596,23 +684,18 @@ int sample_halo_omp(
             }
             local_attempts++;
 
-            double u1 = haloedge * sampler_rng_uniform(&rng);
-            double v1 = M_PI * (sampler_rng_uniform(&rng) * 2.0 - 1.0);
-            double r_cyl = u1;
-            double z = r_cyl * tan(v1);
-            if (fabs(z) > 2.0 * haloedge) {
-                continue;
+            double x, y, z, psi;
+            int spatial_ok = sample_spatial_position(
+                &rng, pot, spatial, &x, &y, &z, &psi
+            );
+            if (spatial_ok < 0) {
+#pragma omp critical
+                {
+                    if (failed == 0) failed = 2;
+                }
+                break;
             }
-            double rad = hypot(r_cyl, z);
-            double rhotst = halo_density_spherical(halo, rad) * (r_cyl * r_cyl + z * z);
-            if (rhotst < rhomin || (rhomax - rhomin) * sampler_rng_uniform(&rng) > rhotst) {
-                continue;
-            }
-            double phi = sampler_rng_range(&rng, 0.0, 2.0 * M_PI);
-            double x = r_cyl * cos(phi);
-            double y = r_cyl * sin(phi);
-            double psi = pot_eval(pot, r_cyl, z);
-            if (psi < pot->psic) {
+            if (spatial_ok == 0) {
                 continue;
             }
             double vmax2 = 2.0 * (psi - pot->psic);
@@ -788,7 +871,7 @@ int sample_disk_omp(
             double vsigp = (omega > 0.0) ? kappa / (2.0 * omega) * vsigR : 0.0;
             double vsigz = sqrt(sigma_z2(pot, corr, r_try));
             double vphi_mode = vphimax;
-            double fmax = 2.0 * find_fmax(
+            double fmax = DISK_VELOCITY_ENVELOPE_SAFETY * find_fmax(
                 vphimax, r_try, z_try, pot, freq, corr, rcirc, vsigp, &vphi_mode
             );
             if (fmax <= 0.0) {
@@ -895,12 +978,9 @@ int sample_bulge_omp(
     int n_particles,
     int seed,
     double mass,
-    double bulgeedge,
-    double wmax,
-    double wmin,
     double streaming,
     const PotPack *pot,
-    const BulgeParams *bulge,
+    const SpatialPack *spatial,
     const DfPack *df,
     const SamplerOpts *opts
 ) {
@@ -941,20 +1021,18 @@ int sample_bulge_omp(
             }
             local_attempts++;
 
-            /* Spherical proposal: r ∝ r² ρ(r), μ=cosθ uniform, φ uniform. */
-            double rad = bulgeedge * sampler_rng_uniform(&rng);
-            double w = sersic_density_spherical(bulge, rad) * rad * rad;
-            if (w < wmin || wmax * sampler_rng_uniform(&rng) > w) {
-                continue;
+            double x, y, z, psi;
+            int spatial_ok = sample_spatial_position(
+                &rng, pot, spatial, &x, &y, &z, &psi
+            );
+            if (spatial_ok < 0) {
+#pragma omp critical
+                {
+                    if (failed == 0) failed = 2;
+                }
+                break;
             }
-            double mu = 2.0 * sampler_rng_uniform(&rng) - 1.0;
-            double phi = sampler_rng_range(&rng, 0.0, 2.0 * M_PI);
-            double r_cyl = rad * sqrt(fmax(0.0, 1.0 - mu * mu));
-            double z = rad * mu;
-            double x = r_cyl * cos(phi);
-            double y = r_cyl * sin(phi);
-            double psi = pot_eval(pot, r_cyl, z);
-            if (psi < pot->psic) {
+            if (spatial_ok == 0) {
                 continue;
             }
             double vmax2 = 2.0 * (psi - pot->psic);

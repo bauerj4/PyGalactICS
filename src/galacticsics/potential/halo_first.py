@@ -88,6 +88,8 @@ def _copy_halo_artifacts(src: Path, dst: Path) -> None:
         "h.dat",
         "denspsihalo.dat",
         "denspsibulge.dat",
+        "halo_spatial_profile.npz",
+        "bulge_spatial_profile.npz",
         "dfnfw.dat",
         "dfsersic.dat",
         "dfhalo.table",

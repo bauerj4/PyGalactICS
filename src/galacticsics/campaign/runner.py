@@ -47,6 +47,8 @@ _IC_SKIP_NAMES = frozenset(
         "freqdbh.dat",
         "denspsihalo.dat",
         "denspsibulge.dat",
+        "halo_spatial_profile.npz",
+        "bulge_spatial_profile.npz",
         "dfnfw.dat",
         "dfsersic.dat",
         "dfhalo.table",
@@ -86,6 +88,143 @@ def _load_ic_particles(work_dir: Path, *, preferred: tuple[str, ...] = ()) -> di
 
 def _model_done_marker(work_dir: Path, stage: Stage) -> Path:
     return work_dir / f".done_{stage}"
+
+
+def _count_nonempty_lines(path: Path) -> int:
+    """Count records without loading a multi-gigabyte particle file."""
+    with path.open("rb") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def _validated_evolve_output(
+    work_dir: Path,
+    *,
+    end_time_gyr: float,
+    expected_n_particles: int,
+) -> dict | None:
+    """Return completion evidence when an evolve output is complete and usable.
+
+    A marker alone is not sufficient: a campaign parent can disappear after a
+    worker finishes, or while a final particle file is being written.  Recovery
+    therefore requires both complete particle files and a final diagnostic at
+    the requested physical horizon.
+    """
+    evolution = work_dir / "evolution"
+    final_path = evolution / "final.dat"
+    types_path = evolution / "final.types"
+    diagnostics_path = evolution / "diagnostics.jsonl"
+    if not all(path.is_file() for path in (final_path, types_path, diagnostics_path)):
+        return None
+    if expected_n_particles < 1:
+        return None
+    if _count_nonempty_lines(final_path) != expected_n_particles:
+        return None
+    if _count_nonempty_lines(types_path) != expected_n_particles:
+        return None
+
+    last: dict | None = None
+    n_records = 0
+    try:
+        with diagnostics_path.open() as handle:
+            for raw in handle:
+                if not raw.strip():
+                    continue
+                last = json.loads(raw)
+                n_records += 1
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if last is None:
+        return None
+
+    try:
+        final_time = float(last["t_gyr"])
+        final_step = int(last["step"])
+        final_n = int(last["n_particles"])
+        d_energy = float(last["dE_over_E0"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    tolerance = max(1e-9, 1e-9 * abs(float(end_time_gyr)))
+    if not np.isfinite(final_time) or abs(final_time - end_time_gyr) > tolerance:
+        return None
+    if final_step < 0 or final_n != expected_n_particles:
+        return None
+    if not np.isfinite(d_energy):
+        return None
+    return {
+        "completed_t_gyr": final_time,
+        "completed_step": final_step,
+        "n_particles": final_n,
+        "n_energies": n_records,
+        "dE_over_E0": d_energy,
+        "output_validated": True,
+    }
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def _commit_evolve_success(
+    work_dir: Path,
+    summary: dict,
+    *,
+    end_time_gyr: float,
+    expected_n_particles: int,
+) -> dict:
+    """Validate and durably commit one successful evolve stage."""
+    evidence = _validated_evolve_output(
+        work_dir,
+        end_time_gyr=end_time_gyr,
+        expected_n_particles=expected_n_particles,
+    )
+    if evidence is None:
+        raise RuntimeError(
+            f"evolve returned without a complete {end_time_gyr:g} Gyr output in "
+            f"{work_dir}"
+        )
+    committed = {**summary, **evidence, "work_dir": str(work_dir)}
+    _atomic_write_json(work_dir / "evolve_result.json", committed)
+    marker = _model_done_marker(work_dir, "evolve")
+    marker_tmp = marker.with_name(f".{marker.name}.tmp")
+    marker_tmp.write_text(
+        f"verified final output: {expected_n_particles} particles at "
+        f"{evidence['completed_t_gyr']} Gyr\n"
+    )
+    os.replace(marker_tmp, marker)
+    return committed
+
+
+def _install_parent_death_signal() -> None:
+    """Terminate a Linux pool worker if its campaign parent disappears."""
+    if not sys.platform.startswith("linux"):
+        return
+    import ctypes
+    import signal
+
+    parent_pid = os.getppid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    # Close the race where the parent exits between getppid() and prctl().
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _terminate_process_pool(pool) -> None:
+    """Best-effort, bounded cleanup for an interrupted process pool."""
+    processes = tuple((getattr(pool, "_processes", None) or {}).values())
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    for process in processes:
+        process.join(timeout=5.0)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1.0)
+    pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _mpi_evolve_available(n_ranks: int) -> bool:
@@ -783,6 +922,48 @@ def _run_evolve(
     }
 
 
+def _evolve_worker(payload: dict) -> dict:
+    """Run and commit one picklable GPU-batch evolve job."""
+    from ntropy.config import BhOptimizationsConfig
+
+    work_dir = Path(payload["work_dir"])
+    bh_raw = payload.get("bh_optimizations") or {"preset": "optimized"}
+    summary = _run_evolve(
+        work_dir,
+        end_time_gyr=float(payload["end_time_gyr"]),
+        diagnostics_every=int(payload["diagnostics_every"]),
+        particle_dump_every=int(payload["particle_dump_every"]),
+        mpi_ranks=int(payload["mpi_ranks"]),
+        core_fraction=float(payload["core_fraction"]),
+        force_rebuild_every=int(payload["force_rebuild_every"]),
+        force_theta=float(payload["force_theta"]),
+        force_active_subset=bool(payload["force_active_subset"]),
+        mpi_local_trees=bool(payload["mpi_local_trees"]),
+        dt_base=float(payload["dt_base"]),
+        timestep_eta=float(payload["timestep_eta"]),
+        max_timestep_bin=int(payload["max_timestep_bin"]),
+        timestep_update_every=int(payload["timestep_update_every"]),
+        integrator_order=int(payload["integrator_order"]),
+        bh_optimizations=BhOptimizationsConfig.from_dict(bh_raw),
+        eps_by_component=payload.get("eps_by_component"),
+        raw_config=payload.get("raw_config"),
+        progress=None,
+        evolve_label=str(payload.get("evolve_label", "evolve")),
+    )
+    summary.update(
+        {
+            "label": payload.get("label", ""),
+            "hash": payload.get("hash", ""),
+        }
+    )
+    return _commit_evolve_success(
+        work_dir,
+        summary,
+        end_time_gyr=float(payload["end_time_gyr"]),
+        expected_n_particles=int(payload["expected_n_particles"]),
+    )
+
+
 def run_campaign(
     spec: GridSpec,
     work_root: Path | str,
@@ -814,6 +995,7 @@ def run_campaign(
     raw_config: dict | None = None,
     solve_kwargs: dict | None = None,
     progress: CampaignProgress | None = None,
+    gpu_batch_size: int = 1,
 ) -> CampaignManifest:
     """
     Execute a parameter grid campaign.
@@ -846,6 +1028,10 @@ def run_campaign(
         Record tiered bin diagnostics every N fine substeps.
     particle_dump_every : int
         Write per-particle ``.npz`` bin dumps every N recorded steps.
+    gpu_batch_size : int
+        Number of independent evolve jobs to run concurrently.  Values above
+        one use spawn workers with parent-death cleanup and durable per-worker
+        completion records.
     skip_done : bool
         Skip stages with ``.done_{stage}`` marker files.
     verbose : bool
@@ -930,8 +1116,12 @@ def run_campaign(
             "diagnostics_every": diagnostics_every,
             "skip_done": skip_done,
             "physics_backend": physics_backend,
+            "gpu_batch_size": gpu_batch_size,
         },
     )
+
+    pending_evolve: list[dict] = []
+    row_by_hash: dict[str, dict] = {}
 
     for model_idx, (label, model) in enumerate(models, start=1):
         mhash = model_hash(model)
@@ -1017,22 +1207,79 @@ def run_campaign(
                 reporter.end_stage("sample", time.perf_counter() - t0, summary)
                 marker.touch()
 
+        evolve_queued = False
         if "evolve" in stages:
             marker = _model_done_marker(model_dir, "evolve")
-            evolve_ok = (
-                skip_done
-                and marker.exists()
-                and (
-                    (model_dir / "evolve_result.json").is_file()
-                    or (model_dir / "evolution" / "final.dat").is_file()
+            expected_n_particles = sum(_particle_file_counts(model_dir).values())
+            completed = None
+            if skip_done:
+                evidence = _validated_evolve_output(
+                    model_dir,
+                    end_time_gyr=end_time_gyr,
+                    expected_n_particles=expected_n_particles,
                 )
-            )
-            if evolve_ok and skip_done and marker.exists():
-                reporter.skip_stage("evolve", reason=".done_evolve")
-            else:
+                if evidence is not None:
+                    existing: dict = {}
+                    result_path = model_dir / "evolve_result.json"
+                    if result_path.is_file():
+                        try:
+                            existing = json.loads(result_path.read_text())
+                        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                            existing = {}
+                    if not marker.exists():
+                        reporter.log(
+                            "  recovered complete evolve output left by an interrupted "
+                            "campaign parent"
+                        )
+                    completed = _commit_evolve_success(
+                        model_dir,
+                        {
+                            **existing,
+                            "recovered_completed_output": not marker.exists(),
+                        },
+                        end_time_gyr=end_time_gyr,
+                        expected_n_particles=expected_n_particles,
+                    )
+                    row.update(completed)
+                    reporter.skip_stage("evolve", reason="validated final output")
+
+            if completed is None and gpu_batch_size > 1:
                 if skip_done and marker.exists():
                     reporter.log(
-                        "  evolve marker present but outputs missing — re-running evolve"
+                        "  evolve marker present but outputs incomplete — re-running evolve"
+                    )
+                evolve_queued = True
+                reporter.log(f"  queue evolve for GPU batch (size={gpu_batch_size})")
+                pending_evolve.append(
+                    {
+                        "work_dir": str(model_dir),
+                        "label": label,
+                        "hash": mhash,
+                        "expected_n_particles": expected_n_particles,
+                        "end_time_gyr": end_time_gyr,
+                        "diagnostics_every": diagnostics_every,
+                        "particle_dump_every": particle_dump_every,
+                        "mpi_ranks": mpi_ranks,
+                        "core_fraction": core_fraction,
+                        "force_rebuild_every": force_rebuild_every,
+                        "force_theta": force_theta,
+                        "force_active_subset": force_active_subset,
+                        "mpi_local_trees": mpi_local_trees,
+                        "dt_base": dt_base,
+                        "timestep_eta": timestep_eta,
+                        "max_timestep_bin": max_timestep_bin,
+                        "timestep_update_every": timestep_update_every,
+                        "integrator_order": integrator_order,
+                        "bh_optimizations": bh_optimizations.to_config_dict(),
+                        "eps_by_component": eps_by_component,
+                        "raw_config": cfg,
+                        "evolve_label": f"{label} evolve",
+                    }
+                )
+            elif completed is None:
+                if skip_done and marker.exists():
+                    reporter.log(
+                        "  evolve marker present but outputs incomplete — re-running evolve"
                     )
                 mpi_note = (
                     f"mpirun -n {mpi_ranks}"
@@ -1067,12 +1314,53 @@ def run_campaign(
                     progress=reporter,
                     evolve_label=f"{label} evolve",
                 )
+                summary = _commit_evolve_success(
+                    model_dir,
+                    summary,
+                    end_time_gyr=end_time_gyr,
+                    expected_n_particles=expected_n_particles,
+                )
                 row.update(summary)
                 reporter.end_stage("evolve", time.perf_counter() - t0, summary)
-                marker.touch()
 
-        append_manifest_row(manifest, row)
-        reporter.end_model(time.perf_counter() - model_t0)
+        row_by_hash[mhash] = row
+        if not evolve_queued:
+            append_manifest_row(manifest, row)
+            reporter.end_model(time.perf_counter() - model_t0)
+
+    if pending_evolve:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        batch = max(1, int(gpu_batch_size))
+        reporter.log(f"GPU evolve: {len(pending_evolve)} queued, batch_size={batch}")
+        for offset in range(0, len(pending_evolve), batch):
+            chunk = pending_evolve[offset : offset + batch]
+            reporter.log(f"  evolving batch {offset // batch + 1}: {len(chunk)} sims")
+            t0 = time.perf_counter()
+            pool = ProcessPoolExecutor(
+                max_workers=len(chunk),
+                mp_context=mp.get_context("spawn"),
+                initializer=_install_parent_death_signal,
+            )
+            futures = {pool.submit(_evolve_worker, job): job for job in chunk}
+            try:
+                for future in as_completed(futures):
+                    job = futures[future]
+                    summary = future.result()
+                    mhash = str(job["hash"])
+                    row = row_by_hash[mhash]
+                    row.update(summary)
+                    append_manifest_row(manifest, row)
+                    reporter.log(f"  done {job['label']} ({mhash[:8]})")
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                _terminate_process_pool(pool)
+                raise
+            else:
+                pool.shutdown(wait=True)
+            reporter.log(f"  batch wall time {time.perf_counter() - t0:.1f}s")
 
     reporter.finish()
     return manifest

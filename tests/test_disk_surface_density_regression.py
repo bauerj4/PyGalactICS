@@ -178,6 +178,41 @@ def test_find_fmax_scans_the_full_velocity_proposal(monkeypatch) -> None:
 
 
 @pytest.mark.essential
+def test_velocity_envelope_covers_a_narrow_secondary_peak(monkeypatch) -> None:
+    """The rejection envelope must cover peaks missed between mode-scan points."""
+    from galacticsics.distribution import diskdf_solve
+    from galacticsics.sampling.python.samplers import DISK_VELOCITY_ENVELOPE_SAFETY
+
+    vpmax = 0.0
+    vsigp = 1.0
+    narrow_peak_velocity = 0.25
+
+    def multimodal_log_df(_vr, vt, _vz, *_args) -> float:
+        broad = -((vt + 2.0) / 0.5) ** 2
+        narrow = np.log(3.0) - ((vt - narrow_peak_velocity) / 1.0e-3) ** 2
+        return max(broad, narrow)
+
+    monkeypatch.setattr(diskdf_solve, "_log_diskdf5ez", multimodal_log_df)
+    selected_value, selected_velocity = diskdf_solve._find_fmax_and_velocity(
+        vpmax,
+        1.0,
+        0.0,
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        vsigp,
+    )
+    true_secondary_peak = np.exp(
+        multimodal_log_df(0.0, narrow_peak_velocity, 0.0)
+    )
+    assert selected_value == pytest.approx(true_secondary_peak, rel=1.0e-3)
+    assert selected_velocity == pytest.approx(-2.0, abs=1.0e-3)
+    assert DISK_VELOCITY_ENVELOPE_SAFETY * selected_value >= true_secondary_peak
+
+
+@pytest.mark.essential
 def test_radial_df_correction_does_not_rescale_sigma_r() -> None:
     """GalactICS f_d corrects fnamidden, not the prescribed sigma_R profile."""
     from galacticsics.distribution.diskdf_solve import _sigma_r2

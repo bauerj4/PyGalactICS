@@ -388,15 +388,23 @@ def bulge_density_psi_array(
     above_cutoff = psi_arr >= psic
     if not np.any(above_cutoff):
         return rho
+    active_psi = psi_arr[above_cutoff]
+    at_ref = active_psi >= psi0
+    rho_vals = np.full_like(active_psi, float(dens_psi[0]))
+    interpolate = ~at_ref
+    if not np.any(interpolate):
+        rho[above_cutoff] = rho_vals
+        return rho
     npsi = len(energies)
-    log_num = np.log((psi0 - psi_arr[above_cutoff]) / max(psi0 - psid, 1e-30))
+    log_num = np.log(
+        (psi0 - active_psi[interpolate]) / max(psi0 - psid, 1e-30)
+    )
     log_den = math.log((psi0 - psic) / max(psi0 - psid, 1e-30))
     rj = 1.0 + float(npsi - 1) * log_num / log_den
     j = np.clip(rj.astype(int), 1, npsi - 1)
     frac = rj - j.astype(float)
-    at_ref = psi_arr[above_cutoff] >= psi0
     interp = dens_psi[j - 1] + frac * (dens_psi[j] - dens_psi[j - 1])
-    rho_vals = np.where(at_ref, float(dens_psi[0]), interp)
+    rho_vals[interpolate] = interp
     rho[above_cutoff] = rho_vals
     return rho
 

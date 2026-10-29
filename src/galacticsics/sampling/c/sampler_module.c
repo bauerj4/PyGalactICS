@@ -136,6 +136,73 @@ static void release_pot_pack_arrays(
     Py_XDECREF(disk_norm_values);
 }
 
+static int fill_spatial_pack(
+    PyObject *pack,
+    SpatialPack *spatial,
+    PyArrayObject **radius_out,
+    PyArrayObject **envelope_out,
+    PyArrayObject **cdf_out,
+    PyArrayObject **psi_out,
+    PyArrayObject **density_out
+) {
+    PyArrayObject *radius = get_required_array(pack, "spatial_radius", 1);
+    PyArrayObject *envelope = get_required_array(pack, "spatial_envelope", 1);
+    PyArrayObject *cdf = get_required_array(pack, "spatial_cdf", 1);
+    PyArrayObject *psi = get_required_array(pack, "spatial_psi", 1);
+    PyArrayObject *density = get_required_array(pack, "spatial_density", 1);
+    if (!radius || !envelope || !cdf || !psi || !density) {
+        Py_XDECREF(radius);
+        Py_XDECREF(envelope);
+        Py_XDECREF(cdf);
+        Py_XDECREF(psi);
+        Py_XDECREF(density);
+        return -1;
+    }
+    if (PyArray_DIM(radius, 0) != PyArray_DIM(envelope, 0)
+        || PyArray_DIM(radius, 0) != PyArray_DIM(cdf, 0)
+        || PyArray_DIM(radius, 0) < 2
+        || PyArray_DIM(psi, 0) != PyArray_DIM(density, 0)
+        || PyArray_DIM(psi, 0) < 2) {
+        Py_DECREF(radius);
+        Py_DECREF(envelope);
+        Py_DECREF(cdf);
+        Py_DECREF(psi);
+        Py_DECREF(density);
+        PyErr_SetString(
+            PyExc_ValueError,
+            "spatial profile arrays must have matching nontrivial lengths"
+        );
+        return -1;
+    }
+    spatial->n_radius = (int)PyArray_DIM(radius, 0);
+    spatial->radius = (const double *)PyArray_DATA(radius);
+    spatial->envelope = (const double *)PyArray_DATA(envelope);
+    spatial->cdf = (const double *)PyArray_DATA(cdf);
+    spatial->n_psi = (int)PyArray_DIM(psi, 0);
+    spatial->psi = (const double *)PyArray_DATA(psi);
+    spatial->density = (const double *)PyArray_DATA(density);
+    *radius_out = radius;
+    *envelope_out = envelope;
+    *cdf_out = cdf;
+    *psi_out = psi;
+    *density_out = density;
+    return 0;
+}
+
+static void release_spatial_pack_arrays(
+    PyArrayObject *radius,
+    PyArrayObject *envelope,
+    PyArrayObject *cdf,
+    PyArrayObject *psi,
+    PyArrayObject *density
+) {
+    Py_XDECREF(radius);
+    Py_XDECREF(envelope);
+    Py_XDECREF(cdf);
+    Py_XDECREF(psi);
+    Py_XDECREF(density);
+}
+
 static PyObject *py_extension_available(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
@@ -149,17 +216,17 @@ static PyObject *py_extension_available(PyObject *self, PyObject *args) {
 static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs) {
     (void)self;
     static char *kwlist[] = {
-        "pack", "n_particles", "seed", "mass", "haloedge", "rhomax", "rhomin",
-        "streaming", "n_threads", "max_attempts", "center", NULL
+        "pack", "n_particles", "seed", "mass", "streaming", "n_threads",
+        "max_attempts", "center", NULL
     };
     PyObject *pack_obj = NULL;
     int n_particles = 0, seed = -1, n_threads = 0, max_attempts = 0, center = 1;
-    double mass = 0, haloedge = 0, rhomax = 0, rhomin = 0, streaming = 0.5;
+    double mass = 0, streaming = 0.5;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "Oiidddddiii", kwlist,
-            &pack_obj, &n_particles, &seed, &mass, &haloedge, &rhomax, &rhomin,
-            &streaming, &n_threads, &max_attempts, &center)) {
+            args, kwargs, "Oiiddiii", kwlist,
+            &pack_obj, &n_particles, &seed, &mass, &streaming,
+            &n_threads, &max_attempts, &center)) {
         return NULL;
     }
     if (!PyDict_Check(pack_obj)) {
@@ -168,7 +235,7 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     }
 
     PotPack pot = {0};
-    HaloParams halo = {0};
+    SpatialPack spatial = {0};
     DfPack df = {0};
     PyArrayObject *apot_arr = NULL;
     PyArrayObject *plcon_arr = NULL;
@@ -183,12 +250,7 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
             &disk_norm_values) < 0) {
         return NULL;
     }
-    if (get_required_double(pack_obj, "halo_a", &halo.a) < 0
-        || get_required_double(pack_obj, "halo_v0", &halo.v0) < 0
-        || get_required_double(pack_obj, "halo_cusp", &halo.cusp) < 0
-        || get_required_double(pack_obj, "halo_r_outer", &halo.r_outer) < 0
-        || get_required_double(pack_obj, "halo_dr_trunc", &halo.dr_trunc) < 0
-        || get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
+    if (get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
         release_pot_pack_arrays(
             apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
         );
@@ -196,41 +258,76 @@ static PyObject *py_sample_halo(PyObject *self, PyObject *args, PyObject *kwargs
     }
     df.psic = pot.psic;
 
-    PyArrayObject *df_energy = get_required_array(pack_obj, "df_energy", 1);
-    PyArrayObject *df_log = get_required_array(pack_obj, "df_log_df", 1);
-    if (!df_energy || !df_log) {
-        Py_XDECREF(df_energy);
-        Py_XDECREF(df_log);
+    PyArrayObject *spatial_radius = NULL;
+    PyArrayObject *spatial_envelope = NULL;
+    PyArrayObject *spatial_cdf = NULL;
+    PyArrayObject *spatial_psi = NULL;
+    PyArrayObject *spatial_density = NULL;
+    if (fill_spatial_pack(
+            pack_obj,
+            &spatial,
+            &spatial_radius,
+            &spatial_envelope,
+            &spatial_cdf,
+            &spatial_psi,
+            &spatial_density) < 0) {
         release_pot_pack_arrays(
             apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
+        return NULL;
+    }
+
+    PyArrayObject *df_energy = get_required_array(pack_obj, "df_energy", 1);
+    PyArrayObject *df_log = get_required_array(pack_obj, "df_log_df", 1);
+    PyArrayObject *df_fmax = get_required_array(pack_obj, "df_fmax_cum", 1);
+    if (!df_energy || !df_log || !df_fmax) {
+        Py_XDECREF(df_energy);
+        Py_XDECREF(df_log);
+        Py_XDECREF(df_fmax);
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
+        release_spatial_pack_arrays(
+            spatial_radius, spatial_envelope, spatial_cdf, spatial_psi,
+            spatial_density
         );
         return NULL;
     }
     df.n = (int)PyArray_DIM(df_energy, 0);
     df.energy = (const double *)PyArray_DATA(df_energy);
     df.log_df = (const double *)PyArray_DATA(df_log);
-    df.fmax_cum = NULL;
+    df.fmax_cum = (const double *)PyArray_DATA(df_fmax);
 
     npy_intp dims[1] = {(npy_intp)(n_particles * 7)};
     PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(1, dims, NPY_FLOAT64);
     if (!out) {
         Py_DECREF(df_energy);
         Py_DECREF(df_log);
+        Py_DECREF(df_fmax);
         release_pot_pack_arrays(
             apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
+        release_spatial_pack_arrays(
+            spatial_radius, spatial_envelope, spatial_cdf, spatial_psi,
+            spatial_density
         );
         return NULL;
     }
 
     SamplerOpts opts = {.n_threads = n_threads, .max_attempts = max_attempts, .center = center};
     int rc = sample_halo_omp(
-        (double *)PyArray_DATA(out), n_particles, seed, mass, haloedge, rhomax, rhomin,
-        streaming, &pot, &halo, &df, &opts
+        (double *)PyArray_DATA(out), n_particles, seed, mass,
+        streaming, &pot, &spatial, &df, &opts
     );
     Py_DECREF(df_energy);
     Py_DECREF(df_log);
+    Py_DECREF(df_fmax);
     release_pot_pack_arrays(
         apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+    );
+    release_spatial_pack_arrays(
+        spatial_radius, spatial_envelope, spatial_cdf, spatial_psi,
+        spatial_density
     );
     if (rc != 0) {
         Py_DECREF(out);
@@ -385,17 +482,17 @@ static PyObject *py_sample_disk(PyObject *self, PyObject *args, PyObject *kwargs
 static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwargs) {
     (void)self;
     static char *kwlist[] = {
-        "pack", "n_particles", "seed", "mass", "bulgeedge", "wmax", "wmin",
-        "streaming", "n_threads", "max_attempts", "center", NULL
+        "pack", "n_particles", "seed", "mass", "streaming", "n_threads",
+        "max_attempts", "center", NULL
     };
     PyObject *pack_obj = NULL;
     int n_particles = 0, seed = -1, n_threads = 0, max_attempts = 0, center = 1;
-    double mass = 0, bulgeedge = 0, wmax = 0, wmin = 0, streaming = 0.5;
+    double mass = 0, streaming = 0.5;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "Oiidddddiii", kwlist,
-            &pack_obj, &n_particles, &seed, &mass, &bulgeedge, &wmax, &wmin,
-            &streaming, &n_threads, &max_attempts, &center)) {
+            args, kwargs, "Oiiddiii", kwlist,
+            &pack_obj, &n_particles, &seed, &mass, &streaming,
+            &n_threads, &max_attempts, &center)) {
         return NULL;
     }
     if (!PyDict_Check(pack_obj)) {
@@ -404,7 +501,7 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
     }
 
     PotPack pot = {0};
-    BulgeParams bulge = {0};
+    SpatialPack spatial = {0};
     DfPack df = {0};
     PyArrayObject *apot_arr = NULL;
     PyArrayObject *plcon_arr = NULL;
@@ -419,18 +516,32 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
             &disk_norm_values) < 0) {
         return NULL;
     }
-    if (get_required_double(pack_obj, "bulge_n", &bulge.n) < 0
-        || get_required_double(pack_obj, "bulge_ppp", &bulge.ppp) < 0
-        || get_required_double(pack_obj, "bulge_Re", &bulge.Re) < 0
-        || get_required_double(pack_obj, "bulge_butt", &bulge.butt) < 0
-        || get_required_double(pack_obj, "bulge_rho0", &bulge.rho0) < 0
-        || get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
+    if (get_required_double(pack_obj, "df_fcut", &df.fcut) < 0) {
         release_pot_pack_arrays(
             apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
         );
         return NULL;
     }
     df.psic = pot.psic;
+
+    PyArrayObject *spatial_radius = NULL;
+    PyArrayObject *spatial_envelope = NULL;
+    PyArrayObject *spatial_cdf = NULL;
+    PyArrayObject *spatial_psi = NULL;
+    PyArrayObject *spatial_density = NULL;
+    if (fill_spatial_pack(
+            pack_obj,
+            &spatial,
+            &spatial_radius,
+            &spatial_envelope,
+            &spatial_cdf,
+            &spatial_psi,
+            &spatial_density) < 0) {
+        release_pot_pack_arrays(
+            apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
+        return NULL;
+    }
 
     PyArrayObject *df_energy = get_required_array(pack_obj, "df_energy", 1);
     PyArrayObject *df_log = get_required_array(pack_obj, "df_log_df", 1);
@@ -441,6 +552,10 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
         Py_XDECREF(df_fmax);
         release_pot_pack_arrays(
             apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+        );
+        release_spatial_pack_arrays(
+            spatial_radius, spatial_envelope, spatial_cdf, spatial_psi,
+            spatial_density
         );
         return NULL;
     }
@@ -458,19 +573,27 @@ static PyObject *py_sample_bulge(PyObject *self, PyObject *args, PyObject *kwarg
         release_pot_pack_arrays(
             apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
         );
+        release_spatial_pack_arrays(
+            spatial_radius, spatial_envelope, spatial_cdf, spatial_psi,
+            spatial_density
+        );
         return NULL;
     }
 
     SamplerOpts opts = {.n_threads = n_threads, .max_attempts = max_attempts, .center = center};
     int rc = sample_bulge_omp(
-        (double *)PyArray_DATA(out), n_particles, seed, mass, bulgeedge, wmax, wmin,
-        streaming, &pot, &bulge, &df, &opts
+        (double *)PyArray_DATA(out), n_particles, seed, mass,
+        streaming, &pot, &spatial, &df, &opts
     );
     Py_DECREF(df_energy);
     Py_DECREF(df_log);
     Py_DECREF(df_fmax);
     release_pot_pack_arrays(
         apot_arr, plcon_arr, disk_norm_radii, disk_norm_values
+    );
+    release_spatial_pack_arrays(
+        spatial_radius, spatial_envelope, spatial_cdf, spatial_psi,
+        spatial_density
     );
     if (rc != 0) {
         Py_DECREF(out);
