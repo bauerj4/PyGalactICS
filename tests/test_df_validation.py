@@ -15,6 +15,7 @@ from galacticsics.diagnostics.df_validation import (
     validate_halo_df,
     validate_ic_distribution_functions,
 )
+from galacticsics.io import read_disk_correction
 from galacticsics.models import GalaxyModel, NFWHalo, PotentialGrid, SersicBulge
 from galacticsics.physics.backend import PhysicsBackendKind
 from galacticsics.potential.solver import solve_potential
@@ -111,6 +112,16 @@ def test_validate_disk_df_passes(sampled_state: ParticleState, sampled_model: Ga
     assert report["df_positive_frac"] >= report["thresholds"]["df_positive_frac"]
     assert report["surface_density_max_rel"] <= report["thresholds"]["surface_density_max_rel"]
     assert report["cordbh_f_sz_min"] >= report["thresholds"]["cordbh_f_sz_min"]
+    corr = read_disk_correction(sampled_work_dir / "cordbh.dat")
+    assert report["sigma_r0_reference"] == pytest.approx(corr.sigma_r0)
+    mask = sampled_state.tags == "disk"
+    pos = sampled_state.pos[mask]
+    vel = sampled_state.vel[mask]
+    radius = np.hypot(pos[:, 0], pos[:, 1])
+    cos_phi = np.divide(pos[:, 0], radius, out=np.ones_like(radius), where=radius > 0)
+    sin_phi = np.divide(pos[:, 1], radius, out=np.zeros_like(radius), where=radius > 0)
+    sigma_r = np.std(vel[:, 0] * cos_phi + vel[:, 1] * sin_phi)
+    assert report["sigma_r0_ratio"] == pytest.approx(sigma_r / corr.sigma_r0)
 
 
 @pytest.mark.physics_python

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -27,7 +28,140 @@ from ntropy.particle_types import TypeRegistry
 from ntropy.particles import ParticleState
 
 
-def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
+# Extremes measured across the 49 accepted one-million-particle disks in the
+# corrected MW Morton v9 campaign.  The default limits below leave 10% headroom
+# beyond every accepted run, rather than treating code-unit velocities as if
+# all galaxy models shared the same circular speed and disk temperature.
+CALIBRATED_HEALTHY_IC_EXTREMA: dict[str, float] = {
+    "disk_v_median_over_vc_min": 0.7787401418757438,
+    "disk_v_p9999_over_vscale_max": 2.2023889084797696,
+    "disk_tail_scaled_max": 1.832180818726503,
+    "disk_rotation_scaled_min": 0.8824127324072207,
+    "disk_prograde_scaled_min": 0.6743928838858929,
+}
+
+DEFAULT_MODEL_SCALED_IC_THRESHOLDS: dict[str, float] = {
+    "r_max_over_rtidal_max": 1.25,
+    "disk_v_median_over_vc_min": 0.9
+    * CALIBRATED_HEALTHY_IC_EXTREMA["disk_v_median_over_vc_min"],
+    "disk_v_p9999_over_vscale_max": 1.1
+    * CALIBRATED_HEALTHY_IC_EXTREMA["disk_v_p9999_over_vscale_max"],
+    "disk_tail_scaled_max": 1.1
+    * CALIBRATED_HEALTHY_IC_EXTREMA["disk_tail_scaled_max"],
+    "disk_rotation_scaled_min": 0.9
+    * CALIBRATED_HEALTHY_IC_EXTREMA["disk_rotation_scaled_min"],
+    "disk_prograde_scaled_min": 0.9
+    * CALIBRATED_HEALTHY_IC_EXTREMA["disk_prograde_scaled_min"],
+    # The existing halo DF validator uses the same 99.5% convention.  The
+    # worst accepted v9 disk measured 99.976% on the deterministic sample.
+    "disk_bound_fraction_min": 0.995,
+    # A correctly area-weighted exponential disk has R_median ~= 1.68 R_d;
+    # sampling R as a simple exponential instead gives ~= 0.69 R_d.
+    "disk_r_median_over_rd_min": 1.0,
+}
+
+
+@dataclass(frozen=True)
+class ICStabilityScales:
+    """Physical velocity and length scales used by the model-aware IC gate."""
+
+    disk_scale_length: float
+    reference_radius: float
+    circular_speed_ref: float
+    sigma_r0: float
+    tidal_radius: float
+
+
+def _ic_stability_context(
+    work_dir: Path,
+    *,
+    model: Any | None = None,
+) -> tuple[ICStabilityScales, Any]:
+    """Load model scales and the solved potential without duplicating I/O."""
+    from galacticsics.io import (
+        read_disk_correction,
+        read_frequency_table,
+        read_harmonic_potential,
+    )
+    from galacticsics.io.formats import read_rtidal
+
+    work_dir = Path(work_dir)
+    pot = read_harmonic_potential(work_dir / "dbh.dat")
+    model = model or pot.model
+    disk = getattr(model, "disk", None)
+    if disk is None or not disk.enabled:
+        raise ValueError("model-aware disk IC checks require an enabled disk")
+    corr = read_disk_correction(work_dir / "cordbh.dat")
+    freq = read_frequency_table(work_dir / "freqdbh.dat")
+    disk_scale_length = float(disk.scale_length)
+    reference_radius = 2.5 * disk_scale_length
+    circular_speed_ref = float(freq.omega(reference_radius) * reference_radius)
+    if not math.isfinite(circular_speed_ref) or circular_speed_ref <= 0.0:
+        raise ValueError(f"invalid circular speed at 2.5 R_d: {circular_speed_ref}")
+    tidal_path = work_dir / "rtidal.dat"
+    tidal_radius = (
+        float(read_rtidal(tidal_path))
+        if tidal_path.is_file()
+        else float(pot.nr * pot.dr)
+    )
+    return (
+        ICStabilityScales(
+            disk_scale_length=disk_scale_length,
+            reference_radius=reference_radius,
+            circular_speed_ref=circular_speed_ref,
+            sigma_r0=float(corr.sigma_r0),
+            tidal_radius=tidal_radius,
+        ),
+        pot,
+    )
+
+
+def load_ic_stability_scales(
+    work_dir: Path,
+    *,
+    model: Any | None = None,
+) -> ICStabilityScales:
+    """Load physical scales for model-aware pre-evolution IC checks."""
+    scales, _ = _ic_stability_context(work_dir, model=model)
+    return scales
+
+
+def _bound_fraction(
+    state: ParticleState,
+    mask: np.ndarray,
+    pot: Any,
+    *,
+    max_samples: int,
+) -> tuple[float, int]:
+    """Deterministic sampled fraction with relative energy above ``Psi_c``."""
+    from galacticsics.potential.evaluate import evaluate_potential
+
+    pos = state.pos[mask]
+    vel = state.vel[mask]
+    n = len(pos)
+    if n == 0:
+        return float("nan"), 0
+    idx = np.linspace(0, n - 1, min(n, max_samples), dtype=int)
+    pos = pos[idx]
+    vel = vel[idx]
+    r_cyl = np.hypot(pos[:, 0], pos[:, 1])
+    psi = np.array(
+        [
+            evaluate_potential(pot, float(r_cyl[i]), float(pos[i, 2]))
+            for i in range(len(pos))
+        ]
+    )
+    energy = psi - 0.5 * np.sum(vel * vel, axis=1)
+    return float(np.mean(energy > float(pot.psic))), int(len(idx))
+
+
+def diagnose_ic_stability(
+    state: ParticleState,
+    *,
+    work_dir: Path | None = None,
+    model: Any | None = None,
+    max_binding_samples: int = 8192,
+) -> dict[str, float]:
     """
     Flag IC issues that tend to destabilize tiered N-body runs.
 
@@ -37,6 +171,11 @@ def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
     means cylindrical velocities were written as Cartesian (gendisk bug).
     """
     out: dict[str, float] = {"r_max": float(np.max(np.linalg.norm(state.pos, axis=1)))}
+    stability_context = (
+        _ic_stability_context(Path(work_dir), model=model)
+        if work_dir is not None
+        else None
+    )
     if state.tags is None:
         speeds = np.linalg.norm(state.vel, axis=1)
         out["v_max"] = float(np.max(speeds))
@@ -61,12 +200,56 @@ def diagnose_ic_stability(state: ParticleState) -> dict[str, float]:
                 out["disk_v_phi_median"] = float(np.median(v_phi))
                 out["disk_r_median"] = float(np.median(r[ok]))
                 out["disk_v_phi_positive_frac"] = float(np.mean(v_phi > 0.0))
+                out["disk_v_p9999"] = float(np.percentile(speeds, 99.99))
+                if stability_context is not None:
+                    scales, pot = stability_context
+                    vc = scales.circular_speed_ref
+                    hotness0 = scales.sigma_r0 / vc
+                    velocity_scale = math.hypot(vc, scales.sigma_r0)
+                    out.update(
+                        {
+                            "r_max_over_rtidal": out["r_max"]
+                            / max(scales.tidal_radius, 1e-30),
+                            "disk_v_median_over_vc": out["disk_v_median"] / vc,
+                            "disk_v_p9999_over_vscale": out["disk_v_p9999"]
+                            / velocity_scale,
+                            "disk_tail_scaled": (
+                                out["disk_v_p9999"]
+                                / max(out["disk_v_median"], 1e-30)
+                                / (1.0 + hotness0)
+                            ),
+                            "disk_rotation_scaled": out["disk_v_phi_mean"]
+                            * (1.0 + hotness0 * hotness0)
+                            / vc,
+                            "disk_prograde_scaled": (
+                                out["disk_v_phi_positive_frac"] - 0.5
+                            )
+                            * (1.0 + hotness0),
+                            "disk_r_median_over_rd": out["disk_r_median"]
+                            / scales.disk_scale_length,
+                            "disk_circular_speed_ref": vc,
+                            "disk_sigma_r0": scales.sigma_r0,
+                            "disk_hotness0": hotness0,
+                        }
+                    )
+                    bound_frac, bound_n = _bound_fraction(
+                        state,
+                        mask,
+                        pot,
+                        max_samples=max_binding_samples,
+                    )
+                    out["disk_bound_fraction"] = bound_frac
+                    out["disk_bound_sample_size"] = float(bound_n)
     return out
 
 
 def ic_looks_stable(
     state: ParticleState,
     *,
+    diag: dict[str, float] | None = None,
+    work_dir: Path | None = None,
+    model: Any | None = None,
+    model_scaled_thresholds: dict[str, float] | None = None,
     disk_v_median_min: float = 0.8,
     disk_v_max: float = 6.0,
     disk_v_max_ratio: float = 5.0,
@@ -76,7 +259,27 @@ def ic_looks_stable(
     disk_r_median_min: float = 2.5,
 ) -> bool:
     """Heuristic pre-evolve check (hot tails, collapsed disk rotation, extreme radii)."""
-    diag = diagnose_ic_stability(state)
+    diag = diag or diagnose_ic_stability(state, work_dir=work_dir, model=model)
+    if "disk_v_median_over_vc" in diag:
+        thr = {
+            **DEFAULT_MODEL_SCALED_IC_THRESHOLDS,
+            **(model_scaled_thresholds or {}),
+        }
+        checks = (
+            diag.get("r_max_over_rtidal", 0.0) <= thr["r_max_over_rtidal_max"],
+            diag["disk_v_median_over_vc"] >= thr["disk_v_median_over_vc_min"],
+            diag.get("disk_v_p9999_over_vscale", math.inf)
+            <= thr["disk_v_p9999_over_vscale_max"],
+            diag.get("disk_tail_scaled", math.inf) <= thr["disk_tail_scaled_max"],
+            diag.get("disk_rotation_scaled", -math.inf)
+            >= thr["disk_rotation_scaled_min"],
+            diag.get("disk_prograde_scaled", -math.inf)
+            >= thr["disk_prograde_scaled_min"],
+            diag.get("disk_bound_fraction", 0.0) >= thr["disk_bound_fraction_min"],
+            diag.get("disk_r_median_over_rd", 0.0)
+            >= thr["disk_r_median_over_rd_min"],
+        )
+        return all(checks)
     if diag["r_max"] > 250.0:
         return False
     if state.tags is not None:
@@ -108,6 +311,9 @@ def explain_ic_instability(
     state: ParticleState | None = None,
     *,
     diag: dict[str, float] | None = None,
+    work_dir: Path | None = None,
+    model: Any | None = None,
+    model_scaled_thresholds: dict[str, float] | None = None,
     disk_v_median_min: float = 0.8,
     disk_v_max: float = 6.0,
     disk_v_max_ratio: float = 5.0,
@@ -129,8 +335,74 @@ def explain_ic_instability(
     if diag is None:
         if state is None:
             raise ValueError("provide state or diag")
-        diag = diagnose_ic_stability(state)
+        diag = diagnose_ic_stability(state, work_dir=work_dir, model=model)
     reasons: list[str] = []
+    if "disk_v_median_over_vc" in diag:
+        thr = {
+            **DEFAULT_MODEL_SCALED_IC_THRESHOLDS,
+            **(model_scaled_thresholds or {}),
+        }
+        scaled_checks = (
+            (
+                "r_max_over_rtidal",
+                "r_max/r_tidal",
+                "max",
+                thr["r_max_over_rtidal_max"],
+            ),
+            (
+                "disk_v_median_over_vc",
+                "disk median |v|/v_c(2.5 R_d)",
+                "min",
+                thr["disk_v_median_over_vc_min"],
+            ),
+            (
+                "disk_v_p9999_over_vscale",
+                "disk v_99.99/[v_c^2+sigma_R,0^2]^1/2",
+                "max",
+                thr["disk_v_p9999_over_vscale_max"],
+            ),
+            (
+                "disk_tail_scaled",
+                "hot-tail ratio corrected for sigma_R,0/v_c",
+                "max",
+                thr["disk_tail_scaled_max"],
+            ),
+            (
+                "disk_rotation_scaled",
+                "asymmetric-drift-scaled mean rotation",
+                "min",
+                thr["disk_rotation_scaled_min"],
+            ),
+            (
+                "disk_prograde_scaled",
+                "temperature-scaled prograde excess",
+                "min",
+                thr["disk_prograde_scaled_min"],
+            ),
+            (
+                "disk_bound_fraction",
+                "disk bound fraction",
+                "min",
+                thr["disk_bound_fraction_min"],
+            ),
+            (
+                "disk_r_median_over_rd",
+                "disk R_median/R_d",
+                "min",
+                thr["disk_r_median_over_rd_min"],
+            ),
+        )
+        for key, label, direction, limit in scaled_checks:
+            value = diag.get(key)
+            if value is None:
+                reasons.append(f"missing model-scaled diagnostic {key}")
+            elif direction == "min" and value < limit:
+                reasons.append(f"{label}={value:.4f} < {limit:.4f}")
+            elif direction == "max" and value > limit:
+                reasons.append(f"{label}={value:.4f} > {limit:.4f}")
+        if not reasons:
+            return "IC velocity structure failed model-scaled checks (unknown)"
+        return "; ".join(reasons)
     if diag["r_max"] > 250.0:
         reasons.append(f"r_max={diag['r_max']:.1f} kpc > 250 (escaped particles)")
     has_components = "disk_v_median" in diag or "disk_v_max" in diag or "halo_v_max" in diag

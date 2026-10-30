@@ -355,7 +355,11 @@ def validate_disk_df(
 
     _, _, v_r, _, _ = _cylindrical_kinematics(state.pos[mask], state.vel[mask])
     sig_r = float(np.std(v_r))
-    sig_r_ratio = sig_r / max(model.disk_kinematics.sigma_r0, 1e-30)
+    # ``diskdf`` rescales sigma_r0 to the requested Toomre Q and records the
+    # value in cordbh.dat.  model.json intentionally retains the input guess,
+    # so using model.disk_kinematics.sigma_r0 here falsely rejects hot disks.
+    sigma_r0_reference = float(corr.sigma_r0)
+    sig_r_ratio = sig_r / max(sigma_r0_reference, 1e-30)
 
     surface = _disk_surface_profile(state)
     surface_max_rel = compare_surface_density(surface, disk_params, min_count=8, skip_edges=1)
@@ -428,6 +432,7 @@ def validate_disk_df(
     out.update(
         {
             "surface_density_max_rel": surface_max_rel,
+            "sigma_r0_reference": sigma_r0_reference,
             "sigma_r0_ratio": sig_r_ratio,
             "a2_over_a0_median": a2_median,
             "a2_over_a0_limit": a2_limit,

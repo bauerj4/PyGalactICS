@@ -288,7 +288,10 @@ def _cached_ics_unstable(
     if counts.get("disk", 0) <= 0:
         return False
     try:
-        from galacticsics.campaign.benchmarks import ic_looks_stable
+        from galacticsics.campaign.benchmarks import (
+            diagnose_ic_stability,
+            ic_looks_stable,
+        )
         from ntropy.integrations.galacticsics import merge_galacticsics_components
 
         particles = _load_ic_particles(work_dir, preferred=tuple(counts))
@@ -299,7 +302,8 @@ def _cached_ics_unstable(
             type_registry=type_registry,
             eps_by_component=eps_by_component or {},
         )
-        return not ic_looks_stable(state)
+        diag = diagnose_ic_stability(state, work_dir=work_dir)
+        return not ic_looks_stable(state, diag=diag)
     except Exception:
         return False
 
@@ -440,9 +444,9 @@ def _run_sample(
                 ic_looks_stable,
             )
 
-            ic_diag = diagnose_ic_stability(state)
+            ic_diag = diagnose_ic_stability(state, work_dir=work_dir, model=model)
             summary["ic_velocity_diag"] = ic_diag
-            if counts.get("disk", 0) > 0 and not ic_looks_stable(state):
+            if counts.get("disk", 0) > 0 and not ic_looks_stable(state, diag=ic_diag):
                 raise RuntimeError(
                     f"disk IC velocity structure looks wrong: {explain_ic_instability(diag=ic_diag)} "
                     f"(diag={ic_diag}). Re-run solve+sample with skip_done=False."
@@ -814,8 +818,8 @@ def _run_evolve(
         ic_looks_stable,
     )
 
-    ic_diag = diagnose_ic_stability(state)
-    if not ic_looks_stable(state):
+    ic_diag = diagnose_ic_stability(state, work_dir=work_dir)
+    if not ic_looks_stable(state, diag=ic_diag):
         msg = (
             f"refusing to evolve with unstable ICs: {explain_ic_instability(diag=ic_diag)} "
             f"(diag={ic_diag}). Re-run solve+sample with skip_done=False."
