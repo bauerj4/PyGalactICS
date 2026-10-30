@@ -17,6 +17,8 @@ import numpy as np
 import pytest
 
 from galacticsics.campaign.benchmarks import (
+    CALIBRATED_HEALTHY_IC_EXTREMA,
+    DEFAULT_MODEL_SCALED_IC_THRESHOLDS,
     diagnose_ic_stability,
     explain_ic_instability,
     ic_looks_stable,
@@ -42,6 +44,53 @@ MW_DBH = Path(__file__).resolve().parents[1] / "models" / "MilkyWay" / "dbh.dat"
 # Literature MW dbh.dat central potential (see docs/dbh_python_backend.md).
 # models/MilkyWay/dbh.dat is gitignored; use this when the file is absent.
 MW_PSI0_LITERATURE = 18.1
+
+
+def _model_scaled_diag(**updates: float) -> dict[str, float]:
+    diag = {
+        "r_max": 200.0,
+        "r_max_over_rtidal": 1.0,
+        "disk_v_median_over_vc": 0.8,
+        "disk_v_p9999_over_vscale": 2.2,
+        "disk_tail_scaled": 1.8,
+        "disk_rotation_scaled": 0.9,
+        "disk_prograde_scaled": 0.7,
+        "disk_bound_fraction": 1.0,
+        "disk_r_median_over_rd": 1.68,
+    }
+    diag.update(updates)
+    return diag
+
+
+def test_model_scaled_ic_limits_leave_headroom_beyond_healthy_corpus() -> None:
+    """Every observed healthy v9 extreme has an explicit 10% safety margin."""
+    thr = DEFAULT_MODEL_SCALED_IC_THRESHOLDS
+    extrema = CALIBRATED_HEALTHY_IC_EXTREMA
+    assert thr["disk_v_median_over_vc_min"] < extrema["disk_v_median_over_vc_min"]
+    assert (
+        thr["disk_v_p9999_over_vscale_max"]
+        > extrema["disk_v_p9999_over_vscale_max"]
+    )
+    assert thr["disk_tail_scaled_max"] > extrema["disk_tail_scaled_max"]
+    assert thr["disk_rotation_scaled_min"] < extrema["disk_rotation_scaled_min"]
+    assert thr["disk_prograde_scaled_min"] < extrema["disk_prograde_scaled_min"]
+
+
+def test_model_scaled_ic_gate_uses_bound_fraction() -> None:
+    from ntropy.particles import ParticleState
+
+    state = ParticleState(
+        pos=np.zeros((1, 3)),
+        vel=np.zeros((1, 3)),
+        mass=np.ones(1),
+        eps=np.full(1, 0.1),
+        tags=np.full(1, "disk"),
+    )
+    assert ic_looks_stable(state, diag=_model_scaled_diag())
+
+    unbound = _model_scaled_diag(disk_bound_fraction=0.994)
+    assert not ic_looks_stable(state, diag=unbound)
+    assert "bound fraction" in explain_ic_instability(diag=unbound)
 
 
 @pytest.mark.physics_python
